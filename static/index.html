@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube to MP3 Test</title>
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;margin:40px;max-width:760px}
+    label,input,button{font-size:16px}
+    .row{margin:12px 0}
+    pre{background:#111;color:#0f0;padding:12px;border-radius:6px;overflow:auto}
+  </style>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+</head>
+<body>
+  <h1>YouTube → MP3 (API Test)</h1>
+  <div class="row">
+    <label for="url">YouTube URL:</label>
+    <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=..." style="width:100%" />
+  </div>
+
+  <div class="row">
+    <div class="cf-turnstile" data-sitekey="0x4AAAAAAB431J5L6kvD9QgM" data-callback="onTurnstile"></div>
+  </div>
+
+  <div class="row">
+    <button id="submit" disabled>Convert</button>
+  </div>
+
+  <h3>Logs</h3>
+  <pre id="logs"></pre>
+
+  <h3>Response</h3>
+  <pre id="response"></pre>
+
+  <script>
+    let captchaToken = "";
+    function onTurnstile(token){
+      captchaToken = token;
+      document.getElementById('submit').disabled = false;
+    }
+
+    function log(msg){
+      const el = document.getElementById('logs');
+      el.textContent += msg + "\n";
+    }
+
+    document.getElementById('submit').addEventListener('click', async () => {
+      const url = document.getElementById('url').value.trim();
+      if(!url){ alert('Enter a YouTube URL'); return; }
+      if(!captchaToken){ alert('Complete CAPTCHA'); return; }
+
+      log('Submitting to /extract ...');
+      try{
+        const res = await fetch('/extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, captcha_token: captchaToken })
+        });
+        const data = await res.json();
+        document.getElementById('response').textContent = JSON.stringify(data, null, 2);
+        if(data.download_endpoint){
+          log('Download: ' + data.download_endpoint);
+        } else {
+          log('No download endpoint returned.');
+        }
+      }catch(err){
+        log('Error: ' + err.message);
+      }
+    });
+  </script>
+</body>
+</html>
