@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  # Redis for caching and job storage
+  redis:
+    image: redis:7-alpine
+    container_name: ytmp3-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Main API service
+  api:
+    build: 
+      context: .
+      dockerfile: Dockerfile.ubuntu
+    container_name: ytmp3-api
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_ADDR=redis:6379
+      - WORKER_POOL_SIZE=20
+      - JOB_QUEUE_CAPACITY=1000
+      - REQUESTS_PER_SECOND=100
+    volumes:
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+          cpus: '1.0'
+
+  # Nginx load balancer
+  nginx:
+    image: nginx:alpine
+    container_name: ytmp3-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx-ubuntu.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  redis_data:
