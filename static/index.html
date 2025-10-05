@@ -24,7 +24,7 @@
   </div>
 
   <div class="row">
-    <button id="submit" disabled>Convert</button>
+    <button id="submit">Convert</button>
   </div>
 
   <h3>Logs</h3>
@@ -48,7 +48,6 @@
     document.getElementById('submit').addEventListener('click', async () => {
       const url = document.getElementById('url').value.trim();
       if(!url){ alert('Enter a YouTube URL'); return; }
-      if(!captchaToken){ alert('Complete CAPTCHA'); return; }
 
       log('Submitting to /extract ...');
       try{
