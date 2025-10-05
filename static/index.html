@@ -3,71 +3,158 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>YouTube to MP3 Test</title>
+  <title>YouTube → MP3 (Advanced Test)</title>
   <style>
-    body{font-family:system-ui,Arial,sans-serif;margin:40px;max-width:760px}
-    label,input,button{font-size:16px}
+    :root{ --bg:#0b1020; --fg:#e7ecff; --muted:#97a0c0; --accent:#6aa0ff; --ok:#2ecc71; --warn:#f1c40f; --err:#ff6b6b }
+    html,body{background:var(--bg); color:var(--fg)}
+    body{font-family:ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:32px; max-width:980px}
+    h1{margin:0 0 8px; font-size:28px}
+    p.sub{margin:0 0 20px; color:var(--muted)}
+    .grid{display:grid; grid-template-columns:1fr 1fr; gap:12px}
     .row{margin:12px 0}
-    pre{background:#111;color:#0f0;padding:12px;border-radius:6px;overflow:auto}
+    label{display:block; margin-bottom:6px; color:var(--muted)}
+    input[type="url"], input[type="text"], input[type="number"]{width:100%; padding:10px 12px; border-radius:8px; border:1px solid #263250; background:#0f1630; color:var(--fg)}
+    .controls{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .tag{display:inline-block; background:#0f1630; border:1px solid #263250; padding:6px 10px; border-radius:999px; color:var(--muted)}
+    button{background:var(--accent); color:#081024; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:600}
+    button[disabled]{opacity:.6; cursor:not-allowed}
+    .danger{background:var(--err); color:white}
+    .ok{background:var(--ok); color:#081024}
+    .box{background:#0f1630; border:1px solid #263250; border-radius:12px; padding:12px}
+    pre{background:#050814; color:#b7cffc; padding:12px; border-radius:8px; overflow:auto; border:1px solid #1f2944}
+    a{color:#9ac3ff}
+    .hidden{display:none}
   </style>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-</head>
-<body>
-  <h1>YouTube → MP3 (API Test)</h1>
-  <div class="row">
-    <label for="url">YouTube URL:</label>
-    <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=..." style="width:100%" />
-  </div>
-
-  <div class="row">
-    <div class="cf-turnstile" data-sitekey="0x4AAAAAAB431J5L6kvD9QgM" data-callback="onTurnstile"></div>
-  </div>
-
-  <div class="row">
-    <button id="submit" disabled>Convert</button>
-  </div>
-
-  <h3>Logs</h3>
-  <pre id="logs"></pre>
-
-  <h3>Response</h3>
-  <pre id="response"></pre>
-
   <script>
+    const DEFAULT_SITE_KEY = "0x4AAAAAAB431J5L6kvD9QgM";
     let captchaToken = "";
-    function onTurnstile(token){
-      captchaToken = token;
-      document.getElementById('submit').disabled = false;
+    let widgetId = null;
+
+    function $(id){ return document.getElementById(id); }
+    function log(msg){ $('logs').textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`; }
+    function setBusy(isBusy){ $('submit').disabled = isBusy || (modeIsCaptcha() && !captchaToken); $('clear').disabled = isBusy; }
+    function apiBase(){ const raw = $('apiBase').value.trim(); return raw ? raw.replace(/\/$/, '') : location.origin; }
+    function modeIsCaptcha(){ return $('modeCaptcha').checked; }
+
+    function renderTurnstile(){
+      const siteKey = $('siteKey').value.trim() || DEFAULT_SITE_KEY;
+      const container = $('turnstileContainer');
+      container.classList.toggle('hidden', !modeIsCaptcha());
+      if(!modeIsCaptcha()) { captchaToken = ""; return; }
+      if(!window.turnstile){ log('Waiting for Turnstile script…'); return; }
+      container.innerHTML = ""; // clear
+      captchaToken = "";
+      $('submit').disabled = true;
+      widgetId = window.turnstile.render(container, {
+        sitekey: siteKey,
+        callback: onTurnstile,
+        'refresh-expired': 'manual'
+      });
+      log(`Turnstile rendered (siteKey=${siteKey.slice(0,8)}… )`);
     }
 
-    function log(msg){
-      const el = document.getElementById('logs');
-      el.textContent += msg + "\n";
-    }
+    function onTurnstile(token){ captchaToken = token; $('submit').disabled = false; log('Turnstile solved ✅'); }
+    function resetTurnstile(){ if(window.turnstile && widgetId!==null){ window.turnstile.reset(widgetId); captchaToken = ""; $('submit').disabled = true; log('Turnstile reset'); } }
+    function clearLogs(){ $('logs').textContent = ""; }
 
-    document.getElementById('submit').addEventListener('click', async () => {
-      const url = document.getElementById('url').value.trim();
+    async function submit(){
+      const url = $('url').value.trim();
       if(!url){ alert('Enter a YouTube URL'); return; }
-      if(!captchaToken){ alert('Complete CAPTCHA'); return; }
+      if(modeIsCaptcha() && !captchaToken){ alert('Complete CAPTCHA'); return; }
 
-      log('Submitting to /extract ...');
+      const body = { url };
+      if(modeIsCaptcha()) body.captcha_token = captchaToken; // in test mode, omit token
+
+      const endpoint = apiBase() + '/extract';
+      $('response').textContent = '';
+      log(`POST ${endpoint}`);
+      setBusy(true);
+      const t0 = performance.now();
       try{
-        const res = await fetch('/extract', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, captcha_token: captchaToken })
+        const res = await fetch(endpoint, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
         });
-        const data = await res.json();
-        document.getElementById('response').textContent = JSON.stringify(data, null, 2);
-        if(data.download_endpoint){
-          log('Download: ' + data.download_endpoint);
+        const text = await res.text();
+        const ms = Math.round(performance.now() - t0);
+        log(`HTTP ${res.status} in ${ms}ms`);
+        let data=null; try{ data = JSON.parse(text); }catch{ /* leave as raw */ }
+        $('response').textContent = data ? JSON.stringify(data, null, 2) : text;
+        if(data && data.download_endpoint){
+          $('download').innerHTML = `<a href="${data.download_endpoint}" target="_blank" rel="noopener">Download MP3</a>`;
+          log('Download ready: ' + data.download_endpoint);
         } else {
-          log('No download endpoint returned.');
+          $('download').textContent = '';
         }
       }catch(err){
-        log('Error: ' + err.message);
+        log('Error: '+ err.message);
+      } finally {
+        setBusy(false);
       }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      $('apiBase').value = location.origin;
+      $('modeCaptcha').addEventListener('change', renderTurnstile);
+      $('modeTest').addEventListener('change', renderTurnstile);
+      $('siteKey').addEventListener('change', renderTurnstile);
+      $('submit').addEventListener('click', submit);
+      $('reset').addEventListener('click', resetTurnstile);
+      $('clear').addEventListener('click', clearLogs);
+      // Preselect mode via query (?mode=test|captcha)
+      const params = new URLSearchParams(location.search);
+      const m = (params.get('mode')||'').toLowerCase();
+      if(m==='test'){ $('modeTest').checked = true; }
+      renderTurnstile();
+      log('Ready. Note: For Test Mode, backend must set TURNSTILE_TEST_MODE=true');
     });
   </script>
+</head>
+<body>
+  <h1>YouTube → MP3</h1>
+  <p class="sub">High-performance API tester with Captcha and Test modes.</p>
+
+  <div class="box">
+    <div class="grid">
+      <div>
+        <label for="apiBase">API Base URL</label>
+        <input id="apiBase" type="text" placeholder="https://api.example.com" />
+      </div>
+      <div>
+        <label for="siteKey">Turnstile Site Key</label>
+        <input id="siteKey" type="text" value="0x4AAAAAAB431J5L6kvD9QgM" />
+      </div>
+    </div>
+
+    <div class="row controls">
+      <span class="tag">Mode</span>
+      <label><input type="radio" name="mode" id="modeCaptcha" checked /> Captcha mode</label>
+      <label><input type="radio" name="mode" id="modeTest" /> Test mode (no token)</label>
+      <button id="reset" class="danger" title="Reset CAPTCHA">Reset CAPTCHA</button>
+      <button id="clear" title="Clear logs">Clear logs</button>
+    </div>
+
+    <div id="turnstileContainer" class="row"></div>
+
+    <div class="row">
+      <label for="url">YouTube URL</label>
+      <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=..." />
+    </div>
+
+    <div class="row">
+      <button id="submit" disabled>Convert</button>
+      <span id="download" style="margin-left:12px"></span>
+    </div>
+  </div>
+
+  <div class="row">
+    <h3>Logs</h3>
+    <pre id="logs"></pre>
+  </div>
+
+  <div class="row">
+    <h3>Response</h3>
+    <pre id="response"></pre>
+  </div>
 </body>
 </html>
