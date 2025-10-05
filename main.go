@@ -50,6 +50,7 @@ var (
     downloadsDir    = getEnv("DOWNLOADS_DIR", "downloads")
     baseURLOverride = os.Getenv("BASE_URL") // optional, e.g., https://api.example.com
     turnstileSecret = os.Getenv("TURNSTILE_SECRET")
+    disableTurnstile = getEnvBool("DISABLE_TURNSTILE", false)
 
     ytdlpTimeout  = getEnvDuration("YTDLP_TIMEOUT", 60*time.Second)
     ffmpegTimeout = getEnvDuration("FFMPEG_TIMEOUT", 8*time.Minute)
@@ -113,29 +114,32 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-    if req.CaptchaToken == "" {
-        http.Error(w, "Missing captcha_token", http.StatusBadRequest)
-        return
-    }
-
 	// 🟢 Log: URL received
     log.Printf("\n🎬 Received URL: %s\n", videoURL)
 
-    // Verify Cloudflare Turnstile before heavy processing
-    clientIP := getClientIP(r)
-    log.Printf("🛡️ Verifying Turnstile token for IP=%s...", clientIP)
-    ok, err := verifyTurnstile(r.Context(), req.CaptchaToken, clientIP)
-    if err != nil {
-        log.Printf("❌ Turnstile verification error: %v", err)
-        http.Error(w, "Captcha verification error", http.StatusInternalServerError)
-        return
+    if disableTurnstile {
+        log.Printf("🛡️ Turnstile disabled via DISABLE_TURNSTILE; skipping verification")
+    } else {
+        if req.CaptchaToken == "" {
+            http.Error(w, "Missing captcha_token", http.StatusBadRequest)
+            return
+        }
+        // Verify Cloudflare Turnstile before heavy processing
+        clientIP := getClientIP(r)
+        log.Printf("🛡️ Verifying Turnstile token for IP=%s...", clientIP)
+        ok, err := verifyTurnstile(r.Context(), req.CaptchaToken, clientIP)
+        if err != nil {
+            log.Printf("❌ Turnstile verification error: %v", err)
+            http.Error(w, "Captcha verification error", http.StatusInternalServerError)
+            return
+        }
+        if !ok {
+            log.Printf("❌ Turnstile verification failed")
+            http.Error(w, "Captcha verification failed", http.StatusBadRequest)
+            return
+        }
+        log.Printf("✅ Turnstile verified")
     }
-    if !ok {
-        log.Printf("❌ Turnstile verification failed")
-        http.Error(w, "Captcha verification failed", http.StatusBadRequest)
-        return
-    }
-    log.Printf("✅ Turnstile verified")
 
     // Concurrency limiting: acquire slot only for heavy work
     select {
@@ -408,6 +412,15 @@ func getEnvDuration(key string, def time.Duration) time.Duration {
     if v := os.Getenv(key); v != "" {
         if d, err := time.ParseDuration(v); err == nil {
             return d
+        }
+    }
+    return def
+}
+
+func getEnvBool(key string, def bool) bool {
+    if v := os.Getenv(key); v != "" {
+        if b, err := strconv.ParseBool(v); err == nil {
+            return b
         }
     }
     return def
