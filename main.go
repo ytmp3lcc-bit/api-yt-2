@@ -73,6 +73,15 @@ var (
     ytdlpDirectFallback = getEnvBool("YTDLP_DIRECT_FALLBACK", true)   // try direct if ffmpeg fails
     ffmpegThreads      = getEnvInt("FFMPEG_THREADS", 0)               // 0 lets ffmpeg decide
 
+    // yt-dlp network tuning
+    ytdlpForceIPv4          = getEnvBool("YTDLP_FORCE_IPV4", false)
+    ytdlpConcurrentFragments = getEnvInt("YTDLP_CONCURRENT_FRAGMENTS", 0) // --concurrent-fragments
+    ytdlpRetries            = getEnvInt("YTDLP_RETRIES", 0)
+    ytdlpSocketTimeout      = getEnv("YTDLP_SOCKET_TIMEOUT", "")       // e.g. 15
+    ytdlpProxy              = getEnv("YTDLP_PROXY", "")
+    ytdlpCookiesPath        = getEnv("YTDLP_COOKIES", "")
+    ytdlpUserAgent          = getEnv("YTDLP_UA", "")
+
     // worker pool / queue
     workerCount  = getEnvInt("WORKER_COUNT", max(2, runtime.NumCPU()))
     queueSize    = getEnvInt("QUEUE_SIZE", 2000)
@@ -272,7 +281,15 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metadata, error) {
     ctx, cancel := context.WithTimeout(parentCtx, ytdlpTimeout)
     defer cancel()
-    args := []string{"-q", "--no-progress", "-f", "bestaudio", "--dump-single-json", "--no-warnings", "--no-call-home", "--geo-bypass", "--ignore-config", videoURL}
+    args := []string{"-q", "--no-progress", "-f", "bestaudio", "--dump-single-json", "--no-warnings", "--no-call-home", "--geo-bypass", "--ignore-config"}
+    if ytdlpForceIPv4 { args = append(args, "--force-ipv4") }
+    if ytdlpConcurrentFragments > 0 { args = append(args, "--concurrent-fragments", strconv.Itoa(ytdlpConcurrentFragments)) }
+    if ytdlpRetries > 0 { args = append(args, "--retries", strconv.Itoa(ytdlpRetries)) }
+    if ytdlpSocketTimeout != "" { args = append(args, "--socket-timeout", ytdlpSocketTimeout) }
+    if ytdlpProxy != "" { args = append(args, "--proxy", ytdlpProxy) }
+    if ytdlpCookiesPath != "" { args = append(args, "--cookies", ytdlpCookiesPath) }
+    if ytdlpUserAgent != "" { args = append(args, "--user-agent", ytdlpUserAgent) }
+    args = append(args, videoURL)
     cmd := exec.CommandContext(ctx, ytDlpPath, args...)
     if wd, err := os.Getwd(); err == nil { cmd.Dir = wd }
     log.Printf("▶️ Running yt-dlp: %s %s", ytDlpPath, strings.Join(args, " "))
@@ -535,8 +552,15 @@ func ytdlpExtractToMP3(parentCtx context.Context, videoURL string, outputPath st
         "--audio-quality", strings.TrimSuffix(mp3Bitrate, "k") + "K",
         "-o", outputPath,
         "--no-warnings", "--no-call-home", "--geo-bypass", "--ignore-config",
-        videoURL,
     }
+    if ytdlpForceIPv4 { args = append(args, "--force-ipv4") }
+    if ytdlpConcurrentFragments > 0 { args = append(args, "--concurrent-fragments", strconv.Itoa(ytdlpConcurrentFragments)) }
+    if ytdlpRetries > 0 { args = append(args, "--retries", strconv.Itoa(ytdlpRetries)) }
+    if ytdlpSocketTimeout != "" { args = append(args, "--socket-timeout", ytdlpSocketTimeout) }
+    if ytdlpProxy != "" { args = append(args, "--proxy", ytdlpProxy) }
+    if ytdlpCookiesPath != "" { args = append(args, "--cookies", ytdlpCookiesPath) }
+    if ytdlpUserAgent != "" { args = append(args, "--user-agent", ytdlpUserAgent) }
+    args = append(args, videoURL)
     cmd := exec.CommandContext(ctx, ytDlpPath, args...)
     if wd, err := os.Getwd(); err == nil { cmd.Dir = wd }
     log.Printf("▶️ Running yt-dlp (direct): %s %s", ytDlpPath, strings.Join(args, " "))
