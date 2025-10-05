@@ -34,7 +34,7 @@
     function $(id){ return document.getElementById(id); }
     function log(msg){ $('logs').textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`; }
     function setBusy(isBusy){ $('submit').disabled = isBusy || (modeIsCaptcha() && !captchaToken); $('clear').disabled = isBusy; }
-    function apiBase(){ const raw = $('apiBase').value.trim(); return raw ? raw.replace(/\/$/, '') : location.origin; }
+    function apiBase(){ const raw = $('apiBase').value.trim(); return raw ? raw.replace(/\/$/, '') : 'http://localhost:8080'; }
     function modeIsCaptcha(){ return $('modeCaptcha').checked; }
 
     function renderTurnstile(){
@@ -94,7 +94,7 @@
     }
 
     window.addEventListener('DOMContentLoaded', () => {
-      $('apiBase').value = location.origin;
+      $('apiBase').value = 'http://localhost:8080';
       $('modeCaptcha').addEventListener('change', renderTurnstile);
       $('modeTest').addEventListener('change', renderTurnstile);
       $('siteKey').addEventListener('change', renderTurnstile);
@@ -118,7 +118,7 @@
     <div class="grid">
       <div>
         <label for="apiBase">API Base URL</label>
-        <input id="apiBase" type="text" placeholder="https://api.example.com" />
+        <input id="apiBase" type="text" value="http://localhost:8080" placeholder="http://localhost:8080" />
       </div>
       <div>
         <label for="siteKey">Turnstile Site Key</label>
