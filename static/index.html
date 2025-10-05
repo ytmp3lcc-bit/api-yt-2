@@ -80,16 +80,41 @@
         log(`HTTP ${res.status} in ${ms}ms`);
         let data=null; try{ data = JSON.parse(text); }catch{ /* leave as raw */ }
         $('response').textContent = data ? JSON.stringify(data, null, 2) : text;
-        if(data && data.download_endpoint){
-          $('download').innerHTML = `<a href="${data.download_endpoint}" target="_blank" rel="noopener">Download MP3</a>`;
-          log('Download ready: ' + data.download_endpoint);
-        } else {
-          $('download').textContent = '';
+        if(data && data.status){
+          if(data.status === 'done' && data.download_endpoint){
+            $('download').innerHTML = `<a href="${data.download_endpoint}" target="_blank" rel="noopener">Download MP3</a>`;
+            log('Download ready: ' + data.download_endpoint);
+          } else if(data.status === 'queued' || data.status === 'processing'){
+            $('download').textContent = '';
+            if(data.status_endpoint){
+              pollStatus(data.status_endpoint);
+            }
+          }
         }
       }catch(err){
         log('Error: '+ err.message);
       } finally {
         setBusy(false);
+      }
+    }
+
+    async function pollStatus(statusUrl){
+      try{
+        log('Polling status: ' + statusUrl);
+        const res = await fetch(statusUrl);
+        const data = await res.json();
+        $('response').textContent = JSON.stringify(data, null, 2);
+        if(data.status === 'done' && data.download_endpoint){
+          $('download').innerHTML = `<a href="${data.download_endpoint}" target="_blank" rel="noopener">Download MP3</a>`;
+          log('Completed ✅');
+        } else if(data.status === 'processing' || data.status === 'queued'){
+          setTimeout(() => pollStatus(statusUrl), 1500);
+        } else if(data.status === 'error'){
+          log('Failed ❌: ' + (data.message || 'error'));
+        }
+      }catch(err){
+        log('Poll error: ' + err.message);
+        setTimeout(() => pollStatus(statusUrl), 3000);
       }
     }
 

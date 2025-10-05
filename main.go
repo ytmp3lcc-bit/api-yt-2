@@ -13,11 +13,14 @@ import (
     "os"
     "os/exec"
     "path/filepath"
+    "runtime"
     "strconv"
     "strings"
+    "sync"
     "time"
 
     "github.com/google/uuid"
+    "golang.org/x/time/rate"
 )
 
 // Metadata structure for response
@@ -43,6 +46,16 @@ type Response struct {
 	Token            string    `json:"token"`
 }
 
+// Status/Extract response structure for async flow
+type JobResponse struct {
+    Status          string     `json:"status"`
+    Token           string     `json:"token"`
+    StatusEndpoint  string     `json:"status_endpoint"`
+    DownloadEndpoint string    `json:"download_endpoint,omitempty"`
+    Metadata        *Metadata  `json:"metadata,omitempty"`
+    Message         string     `json:"message,omitempty"`
+}
+
 // Global configuration populated from environment variables
 var (
     ytDlpPath       = getEnv("YTDLP_BIN", "./yt-dlp")
@@ -54,30 +67,46 @@ var (
 
     ytdlpTimeout  = getEnvDuration("YTDLP_TIMEOUT", 60*time.Second)
     ffmpegTimeout = getEnvDuration("FFMPEG_TIMEOUT", 8*time.Minute)
+    fileTTL        = getEnvDuration("FILE_TTL", 15*time.Minute)
+    mp3Bitrate     = getEnv("MP3_BITRATE", "128k")
 
-    // semaphore to limit concurrent conversions
-    sem chan struct{}
+    // worker pool / queue
+    workerCount  = getEnvInt("WORKER_COUNT", max(2, runtime.NumCPU()))
+    queueSize    = getEnvInt("QUEUE_SIZE", 2000)
+    jobQueue     chan string
+
+    // jobs and caching
+    jobMu         sync.RWMutex
+    tokenToJob    = map[string]*Job{}
+    videoIDToToken = map[string]string{}
+
+    // per-IP rate limiters
+    rateRPS   = getEnvFloat("RATE_RPS", 5)
+    rateBurst = getEnvInt("RATE_BURST", 10)
+    clientsMu sync.Mutex
+    clients   = map[string]*clientLimiter{}
 )
 
 func main() {
     // Configure logger with timestamps
     log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-    // Initialize concurrency limiter
-    maxConc := getEnvInt("MAX_CONCURRENCY", 2)
-    if maxConc < 1 {
-        maxConc = 1
-    }
-    sem = make(chan struct{}, maxConc)
-
     // Routes
     http.HandleFunc("/extract", handleExtract)
+    http.HandleFunc("/status/", handleStatus)
     http.HandleFunc("/download/", handleDownload)
     // Serve static test page on /
     http.Handle("/", http.FileServer(http.Dir("static")))
 
+    // Initialize queue and workers
+    jobQueue = make(chan string, queueSize)
+    for i := 0; i < workerCount; i++ {
+        go worker(i, jobQueue)
+    }
+    go janitor()
+
     port := getEnv("PORT", "8080")
-    log.Printf("🚀 Server running on http://localhost:%s (concurrency=%d)\n", port, maxConc)
+    log.Printf("🚀 Server running on http://localhost:%s (workers=%d, queue=%d)\n", port, workerCount, queueSize)
     log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
@@ -102,7 +131,13 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req Request
+    // IP rate limiting
+    if !allow(r) {
+        http.Error(w, "Too many requests", http.StatusTooManyRequests)
+        return
+    }
+
+    var req Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
@@ -122,19 +157,10 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
         log.Printf("⚠️  TURNSTILE_TEST_MODE enabled: proceeding without captcha_token")
     }
 
-	// 🟢 Log: URL received
+    // 🟢 Log: URL received
     log.Printf("\n🎬 Received URL: %s\n", videoURL)
 
-    // Concurrency limiting: fail fast if saturated
-    select {
-    case sem <- struct{}{}:
-        defer func() { <-sem }()
-    default:
-        http.Error(w, "Server busy, try again later", http.StatusTooManyRequests)
-        return
-    }
-
-    // Verify Cloudflare Turnstile before processing (unless test mode)
+    // Verify Cloudflare Turnstile before enqueuing (unless test mode)
     if !turnstileTestMode {
         clientIP := getClientIP(r)
         log.Printf("🛡️ Verifying Turnstile token for IP=%s...", clientIP)
@@ -154,50 +180,71 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
         log.Printf("🧪 TURNSTILE_TEST_MODE enabled: skipping Turnstile verification")
     }
 
-    // 1️⃣ Extract direct audio stream URL via yt-dlp
-    log.Printf("🔍 Step 1: Extracting audio stream…")
-    audioURL, meta, err := getAudioStream(r.Context(), videoURL)
-	if err != nil {
-        log.Printf("❌ yt-dlp error: %v", err)
-		http.Error(w, fmt.Sprintf("yt-dlp error: %v", err), http.StatusInternalServerError)
-		return
-	}
-    log.Printf("✅ Audio stream extracted successfully")
+    // Caching/dedup by video ID
+    videoID := extractYouTubeID(videoURL)
 
-	// 2️⃣ Convert stream to MP3 file using ffmpeg
-    log.Printf("🎧 Step 2: Converting to MP3…")
-    filePath, err := convertToMP3(r.Context(), audioURL)
-	if err != nil {
-        log.Printf("❌ ffmpeg error: %v", err)
-		http.Error(w, fmt.Sprintf("ffmpeg error: %v", err), http.StatusInternalServerError)
-		return
-	}
-    log.Printf("💾 Saving file… %s", filePath)
-    log.Printf("✅ Done ✅")
-
-    // Build response
-
-	token := filepath.Base(filePath)
-	meta.AudioURL = audioURL
-
-    response := Response{
-        DownloadEndpoint: fmt.Sprintf("%s/download/%s", inferBaseURL(r), token),
-        Metadata:         meta,
-        Token:            token,
+    jobMu.Lock()
+    if existingToken, ok := videoIDToToken[videoID]; ok {
+        if job, ok2 := tokenToJob[existingToken]; ok2 {
+            // Return current state of existing job
+            resp := buildJobResponse(r, job)
+            jobMu.Unlock()
+            w.Header().Set("Content-Type", "application/json")
+            if job.Status == StatusDone {
+                w.WriteHeader(http.StatusOK)
+            } else {
+                w.WriteHeader(http.StatusAccepted)
+            }
+            json.NewEncoder(w).Encode(resp)
+            return
+        }
+        // mapping stale, remove
+        delete(videoIDToToken, videoID)
     }
 
-    log.Printf("📦 Step 3: File ready for download at: %s", response.DownloadEndpoint)
-    log.Printf("------------------------------------------------------------")
+    // Create new job
+    token := uuid.New().String() + ".mp3"
+    outputPath := filepath.Join(downloadsDir, token)
+    job := &Job{
+        Token:      token,
+        VideoURL:   videoURL,
+        VideoID:    videoID,
+        OutputPath: outputPath,
+        Status:     StatusQueued,
+        CreatedAt:  time.Now(),
+        UpdatedAt:  time.Now(),
+    }
+    tokenToJob[token] = job
+    videoIDToToken[videoID] = token
+    jobMu.Unlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+    // enqueue non-blocking
+    select {
+    case jobQueue <- token:
+        log.Printf("📥 Job queued token=%s videoID=%s", token, videoID)
+    default:
+        log.Printf("🚫 Queue full; rejecting job")
+        http.Error(w, "Queue is busy. Try again later.", http.StatusServiceUnavailable)
+        return
+    }
+
+    // Respond with status endpoint
+    resp := JobResponse{
+        Status:         string(StatusQueued),
+        Token:          token,
+        StatusEndpoint: fmt.Sprintf("%s/status/%s", inferBaseURL(r), token),
+    }
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusAccepted)
+    json.NewEncoder(w).Encode(resp)
 }
 
 // Use yt-dlp to get audio stream URL + metadata
 func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metadata, error) {
     ctx, cancel := context.WithTimeout(parentCtx, ytdlpTimeout)
     defer cancel()
-    cmd := exec.CommandContext(ctx, ytDlpPath, "-f", "bestaudio", "--dump-single-json", "--no-warnings", videoURL)
+    args := []string{"-f", "bestaudio", "--dump-single-json", "--no-warnings", "--no-call-home", "--geo-bypass", "--ignore-config", videoURL}
+    cmd := exec.CommandContext(ctx, ytDlpPath, args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -231,34 +278,34 @@ func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metada
     return data.URL, meta, nil
 }
 
-// Convert audio stream URL to MP3
-func convertToMP3(parentCtx context.Context, audioURL string) (string, error) {
-    token := uuid.New().String()
-    outputDir := downloadsDir
+// Convert audio stream URL to MP3 at a target path
+func convertToMP3(parentCtx context.Context, audioURL string, outputPath string) error {
+    if err := os.MkdirAll(filepath.Dir(outputPath), os.ModePerm); err != nil {
+        return err
+    }
 
-	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
-		return "", err
-	}
-
-	outputPath := filepath.Join(outputDir, token+".mp3")
-
-	start := time.Now()
+    start := time.Now()
 
     ctx, cancel := context.WithTimeout(parentCtx, ffmpegTimeout)
     defer cancel()
-    cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", audioURL, "-vn", "-ab", "192k", "-ar", "44100", "-f", "mp3", outputPath)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+    // Use libmp3lame, lower bitrate to reduce CPU, hide banner for speed
+    cmd := exec.CommandContext(ctx, ffmpegPath,
+        "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-y", "-i", audioURL, "-vn",
+        "-b:a", mp3Bitrate, "-ar", "44100",
+        "-f", "mp3", outputPath,
+    )
+    var out bytes.Buffer
+    cmd.Stdout = &out
+    cmd.Stderr = &out
 
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("ffmpeg error: %v\nOutput: %s", err, out.String())
-	}
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("ffmpeg error: %v\nOutput: %s", err, out.String())
+    }
 
-	elapsed := time.Since(start)
+    elapsed := time.Since(start)
     log.Printf("⏱️ Conversion time: %.2fs", elapsed.Seconds())
-
-	return outputPath, nil
+    return nil
 }
 
 // Serve MP3 file download
@@ -290,6 +337,224 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "audio/mpeg")
     w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", token))
 	io.Copy(w, file)
+}
+
+// handleStatus returns job state for a token
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+    enableCORS(w)
+
+    if r.Method == http.MethodOptions {
+        w.WriteHeader(http.StatusOK)
+        return
+    }
+    if r.Method != http.MethodGet {
+        http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+        return
+    }
+    if !allow(r) {
+        http.Error(w, "Too many requests", http.StatusTooManyRequests)
+        return
+    }
+
+    token := filepath.Base(r.URL.Path)
+    jobMu.RLock()
+    job, ok := tokenToJob[token]
+    jobMu.RUnlock()
+    if !ok {
+        http.Error(w, "Unknown token", http.StatusNotFound)
+        return
+    }
+    resp := buildJobResponse(r, job)
+    w.Header().Set("Content-Type", "application/json")
+    if job.Status == StatusDone {
+        w.WriteHeader(http.StatusOK)
+    } else if job.Status == StatusError {
+        w.WriteHeader(http.StatusInternalServerError)
+    } else {
+        w.WriteHeader(http.StatusAccepted)
+    }
+    json.NewEncoder(w).Encode(resp)
+}
+
+// Job and worker infrastructure
+type JobStatus string
+
+const (
+    StatusQueued     JobStatus = "queued"
+    StatusProcessing JobStatus = "processing"
+    StatusDone       JobStatus = "done"
+    StatusError      JobStatus = "error"
+)
+
+type Job struct {
+    Token      string
+    VideoURL   string
+    VideoID    string
+    OutputPath string
+    Status     JobStatus
+    Metadata   *Metadata
+    Message    string
+    CreatedAt  time.Time
+    UpdatedAt  time.Time
+    ExpiresAt  time.Time
+}
+
+func worker(id int, queue <-chan string) {
+    log.Printf("👷 worker-%d started", id)
+    for token := range queue {
+        jobMu.RLock()
+        job := tokenToJob[token]
+        jobMu.RUnlock()
+        if job == nil {
+            continue
+        }
+
+        // start processing
+        jobMu.Lock()
+        job.Status = StatusProcessing
+        job.UpdatedAt = time.Now()
+        jobMu.Unlock()
+        log.Printf("👷 worker-%d processing token=%s", id, token)
+
+        // perform extraction and conversion
+        ctx := context.Background()
+        audioURL, meta, err := getAudioStream(ctx, job.VideoURL)
+        if err == nil {
+            err = convertToMP3(ctx, audioURL, job.OutputPath)
+        }
+
+        jobMu.Lock()
+        if err != nil {
+            job.Status = StatusError
+            job.Message = err.Error()
+            job.UpdatedAt = time.Now()
+            log.Printf("❌ job token=%s error=%v", token, err)
+        } else {
+            job.Status = StatusDone
+            job.Metadata = meta
+            job.Metadata.AudioURL = audioURL
+            job.UpdatedAt = time.Now()
+            job.ExpiresAt = time.Now().Add(fileTTL)
+            log.Printf("✅ job token=%s done; file=%s", token, job.OutputPath)
+        }
+        jobMu.Unlock()
+    }
+}
+
+func buildJobResponse(r *http.Request, job *Job) JobResponse {
+    resp := JobResponse{
+        Status:         string(job.Status),
+        Token:          job.Token,
+        StatusEndpoint: fmt.Sprintf("%s/status/%s", inferBaseURL(r), job.Token),
+        Message:        job.Message,
+    }
+    if job.Status == StatusDone {
+        resp.DownloadEndpoint = fmt.Sprintf("%s/download/%s", inferBaseURL(r), job.Token)
+        resp.Metadata = job.Metadata
+    }
+    return resp
+}
+
+// Janitor periodically removes expired files and stale jobs
+func janitor() {
+    ticker := time.NewTicker(1 * time.Minute)
+    defer ticker.Stop()
+    for range ticker.C {
+        // cleanup files
+        entries, err := os.ReadDir(downloadsDir)
+        if err == nil {
+            cutoff := time.Now().Add(-fileTTL)
+            for _, e := range entries {
+                if e.IsDir() { continue }
+                name := e.Name()
+                if !strings.HasSuffix(strings.ToLower(name), ".mp3") { continue }
+                info, err := e.Info()
+                if err != nil { continue }
+                if info.ModTime().Before(cutoff) {
+                    fp := filepath.Join(downloadsDir, name)
+                    _ = os.Remove(fp)
+                }
+            }
+        }
+
+        // cleanup jobs and limiter map
+        jobMu.Lock()
+        for token, job := range tokenToJob {
+            if job.Status == StatusDone && time.Since(job.UpdatedAt) > fileTTL {
+                delete(tokenToJob, token)
+                if job.VideoID != "" {
+                    if cur, ok := videoIDToToken[job.VideoID]; ok && cur == token {
+                        delete(videoIDToToken, job.VideoID)
+                    }
+                }
+            }
+            if job.Status == StatusError && time.Since(job.UpdatedAt) > 10*time.Minute {
+                delete(tokenToJob, token)
+            }
+        }
+        jobMu.Unlock()
+
+        // prune old clients
+        clientsMu.Lock()
+        for ip, c := range clients {
+            if time.Since(c.lastSeen) > 10*time.Minute {
+                delete(clients, ip)
+            }
+        }
+        clientsMu.Unlock()
+    }
+}
+
+// Rate limiting per client IP
+type clientLimiter struct {
+    limiter  *rate.Limiter
+    lastSeen time.Time
+}
+
+func allow(r *http.Request) bool {
+    ip := getClientIP(r)
+    now := time.Now()
+    clientsMu.Lock()
+    cl, exists := clients[ip]
+    if !exists {
+        cl = &clientLimiter{limiter: rate.NewLimiter(rate.Limit(rateRPS), rateBurst)}
+        clients[ip] = cl
+    }
+    cl.lastSeen = now
+    clientsMu.Unlock()
+    return cl.limiter.Allow()
+}
+
+// Utility helpers
+func max(a, b int) int { if a > b { return a } ; return b }
+
+func getEnvFloat(key string, def float64) float64 {
+    if v := os.Getenv(key); v != "" {
+        if f, err := strconv.ParseFloat(v, 64); err == nil {
+            return f
+        }
+    }
+    return def
+}
+
+// extractYouTubeID attempts to derive a stable video ID from common URL forms
+func extractYouTubeID(raw string) string {
+    u, err := url.Parse(raw)
+    if err != nil { return raw }
+    host := strings.ToLower(u.Host)
+    if strings.Contains(host, "youtu.be") {
+        return strings.TrimPrefix(u.Path, "/")
+    }
+    if strings.Contains(host, "youtube.com") {
+        q := u.Query().Get("v")
+        if q != "" { return q }
+        // Short forms like /shorts/<id>
+        parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+        if len(parts) >= 2 && (parts[0] == "shorts" || parts[0] == "embed") {
+            return parts[1]
+        }
+    }
+    return raw
 }
 
 // verifyTurnstile validates a Cloudflare Turnstile token using the secret from env
