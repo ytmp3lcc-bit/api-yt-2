@@ -1,24 +1,22 @@
 package main
 
 import (
-    "bytes"
-    "context"
-    "encoding/json"
-    "fmt"
-    "io"
-    "log"
-    "net"
-    "net/http"
-    "net/url"
-    "os"
-    "os/exec"
-    "path/filepath"
-    "strconv"
-    "strings"
-    "time"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"time"
 
-    "github.com/google/uuid"
+	"github.com/google/uuid"
 )
+
+// --- Data Structures ---
 
 // Metadata structure for response
 type Metadata struct {
@@ -32,53 +30,71 @@ type Metadata struct {
 
 // Request body structure
 type Request struct {
-    URL          string `json:"url"`
-    CaptchaToken string `json:"captcha_token"`
+	URL string `json:"url"`
 }
 
-// Response structure
-type Response struct {
-	DownloadEndpoint string    `json:"download_endpoint"`
-	Metadata         *Metadata `json:"metadata"`
-	Token            string    `json:"token"`
-}
+// JobStatus represents the current state of a conversion job
+type JobStatus string
 
-// Global configuration populated from environment variables
-var (
-    ytDlpPath       = getEnv("YTDLP_BIN", "yt-dlp")
-    ffmpegPath      = getEnv("FFMPEG_BIN", "ffmpeg")
-    downloadsDir    = getEnv("DOWNLOADS_DIR", "downloads")
-    baseURLOverride = os.Getenv("BASE_URL") // optional, e.g., https://api.example.com
-    turnstileSecret = os.Getenv("TURNSTILE_SECRET")
-    disableTurnstile = getEnvBool("DISABLE_TURNSTILE", false)
-
-    ytdlpTimeout  = getEnvDuration("YTDLP_TIMEOUT", 60*time.Second)
-    ffmpegTimeout = getEnvDuration("FFMPEG_TIMEOUT", 8*time.Minute)
-
-    // semaphore to limit concurrent conversions
-    sem chan struct{}
+const (
+	StatusPending    JobStatus = "pending"
+	StatusProcessing JobStatus = "processing"
+	StatusCompleted  JobStatus = "completed"
+	StatusFailed     JobStatus = "failed"
 )
 
+// ConversionJob holds information about a single conversion request
+type ConversionJob struct {
+	ID           string
+	URL          string
+	Status       JobStatus
+	CreatedAt    time.Time
+	StartedAt    time.Time
+	CompletedAt  time.Time
+	FilePath     string    // Local path to the converted MP3
+	DownloadURL  string    // Public URL for download
+	Error        string    // Error message if conversion failed
+	Metadata     *Metadata // Extracted metadata
+	Retries      int       // Number of retries attempted
+	MaxRetries   int       // Maximum allowed retries
+}
+
+// JobQueue is a channel to send jobs to workers
+var jobQueue chan *ConversionJob
+
+// JobStore to keep track of all jobs by ID
+var jobStore = struct {
+	sync.RWMutex
+	jobs map[string]*ConversionJob
+}{
+	jobs: make(map[string]*ConversionJob),
+}
+
+// --- Configuration ---
+const (
+	WorkerPoolSize = 5     // Number of concurrent conversions
+	MaxJobRetries  = 3     // Max retries for a failed conversion
+	JobQueueCapacity = 100 // Max pending jobs in queue
+)
+
+// --- Main Server Setup ---
+
 func main() {
-    // Configure logger with timestamps
-    log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	// Initialize job queue
+	jobQueue = make(chan *ConversionJob, JobQueueCapacity)
 
-    // Initialize concurrency limiter
-    maxConc := getEnvInt("MAX_CONCURRENCY", 2)
-    if maxConc < 1 {
-        maxConc = 1
-    }
-    sem = make(chan struct{}, maxConc)
+	// Start worker pool
+	for i := 0; i < WorkerPoolSize; i++ {
+		go startWorker(i)
+	}
 
-    // Routes
-    http.HandleFunc("/extract", handleExtract)
-    http.HandleFunc("/download/", handleDownload)
-    // Serve static test page on /
-    http.Handle("/", http.FileServer(http.Dir("static")))
+	// Setup HTTP routes
+	http.HandleFunc("/extract", handleExtract)
+	http.HandleFunc("/status/", handleStatus) // New endpoint to check job status
+	http.HandleFunc("/download/", handleDownload)
 
-    port := getEnv("PORT", "8080")
-    log.Printf("🚀 Server running on http://localhost:%s (concurrency=%d)\n", port, maxConc)
-    log.Fatal(http.ListenAndServe(":"+port, nil))
+	fmt.Printf("🚀 Server running on http://localhost:8080 with %d workers\n", WorkerPoolSize)
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 // Enable CORS for browser requests
@@ -88,7 +104,9 @@ func enableCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 }
 
-// Handle extract request
+// --- Handlers ---
+
+// handleExtract creates a new conversion job and adds it to the queue
 func handleExtract(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
 
@@ -97,7 +115,7 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-    if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
 		return
 	}
@@ -108,92 +126,221 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-    videoURL := req.URL
-	if videoURL == "" {
+	if req.URL == "" {
 		http.Error(w, "Missing YouTube URL", http.StatusBadRequest)
 		return
 	}
 
-	// 🟢 Log: URL received
-    log.Printf("\n🎬 Received URL: %s\n", videoURL)
+	jobID := uuid.New().String()
+	job := &ConversionJob{
+		ID:         jobID,
+		URL:        req.URL,
+		Status:     StatusPending,
+		CreatedAt:  time.Now(),
+		MaxRetries: MaxJobRetries,
+	}
 
-    if disableTurnstile {
-        log.Printf("🛡️ Turnstile disabled via DISABLE_TURNSTILE; skipping verification")
-    } else {
-        if req.CaptchaToken == "" {
-            http.Error(w, "Missing captcha_token", http.StatusBadRequest)
-            return
-        }
-        // Verify Cloudflare Turnstile before heavy processing
-        clientIP := getClientIP(r)
-        log.Printf("🛡️ Verifying Turnstile token for IP=%s...", clientIP)
-        ok, err := verifyTurnstile(r.Context(), req.CaptchaToken, clientIP)
-        if err != nil {
-            log.Printf("❌ Turnstile verification error: %v", err)
-            http.Error(w, "Captcha verification error", http.StatusInternalServerError)
-            return
-        }
-        if !ok {
-            log.Printf("❌ Turnstile verification failed")
-            http.Error(w, "Captcha verification failed", http.StatusBadRequest)
-            return
-        }
-        log.Printf("✅ Turnstile verified")
-    }
+	jobStore.Lock()
+	jobStore.jobs[jobID] = job
+	jobStore.Unlock()
 
-    // Concurrency limiting: acquire slot only for heavy work
-    select {
-    case sem <- struct{}{}:
-        defer func() { <-sem }()
-    default:
-        http.Error(w, "Server busy, try again later", http.StatusTooManyRequests)
-        return
-    }
+	// Add job to the queue
+	select {
+	case jobQueue <- job:
+		fmt.Printf("✅ Job %s added to queue for URL: %s\n", jobID, req.URL)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"job_id": jobID,
+			"status": string(job.Status),
+			"check_status_endpoint": fmt.Sprintf("http://localhost:8080/status/%s", jobID),
+		})
+	default:
+		// Queue is full
+		jobStore.Lock()
+		delete(jobStore.jobs, jobID) // Remove job if it couldn't be queued
+		jobStore.Unlock()
+		http.Error(w, "Server busy, please try again later.", http.StatusServiceUnavailable)
+		fmt.Printf("❌ Job %s for URL %s rejected, queue full.\n", jobID, req.URL)
+	}
+}
 
-    // 1️⃣ Extract direct audio stream URL via yt-dlp
-    log.Printf("🔍 Step 1: Extracting audio stream…")
-    audioURL, meta, err := getAudioStream(r.Context(), videoURL)
-	if err != nil {
-        log.Printf("❌ yt-dlp error: %v", err)
-		http.Error(w, fmt.Sprintf("yt-dlp error: %v", err), http.StatusInternalServerError)
+// handleStatus allows clients to check the progress of a conversion job
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
-    log.Printf("✅ Audio stream extracted successfully")
 
-	// 2️⃣ Convert stream to MP3 file using ffmpeg
-    log.Printf("🎧 Step 2: Converting to MP3…")
-    filePath, err := convertToMP3(r.Context(), audioURL)
-	if err != nil {
-        log.Printf("❌ ffmpeg error: %v", err)
-		http.Error(w, fmt.Sprintf("ffmpeg error: %v", err), http.StatusInternalServerError)
+	jobID := filepath.Base(r.URL.Path)
+	if jobID == "" {
+		http.Error(w, "Missing job ID", http.StatusBadRequest)
 		return
 	}
-    log.Printf("💾 Saving file… %s", filePath)
-    log.Printf("✅ Done ✅")
 
-    // Build response
+	jobStore.RLock()
+	job, exists := jobStore.jobs[jobID]
+	jobStore.RUnlock()
 
-	token := filepath.Base(filePath)
-	meta.AudioURL = audioURL
+	if !exists {
+		http.Error(w, "Job not found", http.StatusNotFound)
+		return
+	}
 
-    response := Response{
-        DownloadEndpoint: fmt.Sprintf("%s/download/%s", inferBaseURL(r), token),
-        Metadata:         meta,
-        Token:            token,
-    }
-
-    log.Printf("📦 Step 3: File ready for download at: %s", response.DownloadEndpoint)
-    log.Printf("------------------------------------------------------------")
+	response := struct {
+		JobID        string    `json:"job_id"`
+		Status       JobStatus `json:"status"`
+		Progress     string    `json:"progress,omitempty"` // Could add percentage here
+		DownloadURL  string    `json:"download_url,omitempty"`
+		Error        string    `json:"error,omitempty"`
+		Metadata     *Metadata `json:"metadata,omitempty"`
+		CreatedAt    time.Time `json:"created_at"`
+		CompletedAt  time.Time `json:"completed_at,omitempty"`
+	}{
+		JobID:       job.ID,
+		Status:      job.Status,
+		DownloadURL: job.DownloadURL,
+		Error:       job.Error,
+		Metadata:    job.Metadata,
+		CreatedAt:   job.CreatedAt,
+		CompletedAt: job.CompletedAt,
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
-// Use yt-dlp to get audio stream URL + metadata
-func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metadata, error) {
-    ctx, cancel := context.WithTimeout(parentCtx, ytdlpTimeout)
-    defer cancel()
-    cmd := exec.CommandContext(ctx, ytDlpPath, "-f", "bestaudio", "--no-playlist", "--dump-single-json", "--no-warnings", videoURL)
+// handleDownload serves the converted MP3 file
+func handleDownload(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// The token is actually the jobID.mp3
+	filenameWithExt := filepath.Base(r.URL.Path)
+	jobID := filenameWithExt[:len(filenameWithExt)-len(".mp3")] // Extract jobID from filename
+
+	jobStore.RLock()
+	job, exists := jobStore.jobs[jobID]
+	jobStore.RUnlock()
+
+	if !exists || job.Status != StatusCompleted {
+		http.Error(w, "File not found or conversion not completed", http.StatusNotFound)
+		return
+	}
+	if job.FilePath == "" { // Should not happen if status is completed, but as a safeguard
+		http.Error(w, "File path not available", http.StatusInternalServerError)
+		return
+	}
+
+	file, err := os.Open(job.FilePath)
+	if err != nil {
+		http.Error(w, "Error opening file", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	fmt.Printf("⬇️  File requested for download: %s (Job ID: %s)\n", filenameWithExt, jobID)
+
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filenameWithExt))
+	io.Copy(w, file)
+}
+
+// --- Worker Logic ---
+
+// startWorker listens on the jobQueue and processes jobs
+func startWorker(workerID int) {
+	fmt.Printf("Worker %d started.\n", workerID)
+	for job := range jobQueue {
+		processJob(job, workerID)
+	}
+}
+
+func processJob(job *ConversionJob, workerID int) {
+	log.Printf("Worker %d: Processing job %s for URL: %s\n", workerID, job.ID, job.URL)
+
+	// Update job status
+	jobStore.Lock()
+	job.Status = StatusProcessing
+	job.StartedAt = time.Now()
+	jobStore.Unlock()
+
+	outputDir := "downloads"
+	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
+		updateJobStatus(job, StatusFailed, fmt.Sprintf("Error creating downloads directory: %v", err))
+		return
+	}
+	outputPath := filepath.Join(outputDir, job.ID+".mp3")
+
+	// --- Step 1: Extract direct audio stream URL via yt-dlp ---
+	audioURL, meta, err := getAudioStreamFromYTDLP(job.URL) // Renamed to avoid conflict
+	if err != nil {
+		handleJobFailure(job, err, "yt-dlp stream extraction failed")
+		return
+	}
+
+	// --- Step 2: Convert stream to MP3 file using ffmpeg ---
+	err = convertStreamToMP3(audioURL, outputPath)
+	if err != nil {
+		handleJobFailure(job, err, "ffmpeg conversion failed")
+		return
+	}
+
+	// --- Job Completed Successfully ---
+	jobStore.Lock()
+	job.Status = StatusCompleted
+	job.CompletedAt = time.Now()
+	job.FilePath = outputPath
+	job.DownloadURL = fmt.Sprintf("http://localhost:8080/download/%s.mp3", job.ID)
+	job.Metadata = meta
+	job.Error = "" // Clear any previous errors
+	jobStore.Unlock()
+
+	log.Printf("Worker %d: Job %s completed successfully. Download: %s\n", workerID, job.ID, job.DownloadURL)
+}
+
+// Helper to update job status
+func updateJobStatus(job *ConversionJob, status JobStatus, errMsg string) {
+	jobStore.Lock()
+	job.Status = status
+	job.Error = errMsg
+	if status == StatusFailed {
+		job.CompletedAt = time.Now() // Mark as completed (failed)
+	}
+	jobStore.Unlock()
+	log.Printf("Job %s status updated to %s: %s\n", job.ID, status, errMsg)
+}
+
+// Helper to handle job failures with retries
+func handleJobFailure(job *ConversionJob, err error, stage string) {
+	job.Retries++
+	if job.Retries <= job.MaxRetries {
+		log.Printf("Job %s (%s): %s. Retrying (%d/%d)...\n", job.ID, job.URL, err.Error(), job.Retries, job.MaxRetries)
+		// Re-add to queue for retry (with a small delay in a real-world scenario)
+		time.Sleep(5 * time.Second) // Simulate a delay before retrying
+		select {
+		case jobQueue <- job:
+			// Job successfully re-queued for retry. Status remains processing or pending depending on implementation
+			// For simplicity here, it just goes back to queue, actual status might be 'retrying'
+		default:
+			// If queue is full even for retries, mark as failed
+			updateJobStatus(job, StatusFailed, fmt.Sprintf("%s: %v. Max retries exceeded and queue full.", stage, err))
+		}
+	} else {
+		updateJobStatus(job, StatusFailed, fmt.Sprintf("%s: %v. Max retries (%d) exceeded.", stage, err, job.MaxRetries))
+	}
+}
+
+// --- yt-dlp and FFmpeg functions (reused from previous optimized version) ---
+
+// getAudioStreamFromYTDLP uses yt-dlp to get audio stream URL + metadata
+func getAudioStreamFromYTDLP(videoURL string) (string, *Metadata, error) {
+	cmd := exec.Command("./yt-dlp", "-f", "bestaudio", "--dump-json", "--no-warnings", videoURL)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -206,222 +353,56 @@ func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metada
 		Title    string  `json:"title"`
 		Uploader string  `json:"uploader"`
 		Duration float64 `json:"duration"`
-		URL      string  `json:"url"`
+		URL      string  `json:"url"` // The URL of the selected 'bestaudio' stream
 		Ext      string  `json:"ext"`
-		Abr      int     `json:"abr"`
+		Abr      float64 `json:"abr"` // Use float64 for parsing, then convert to int
 	}
 
 	if err := json.Unmarshal(out.Bytes(), &data); err != nil {
-		return "", nil, fmt.Errorf("JSON parse error: %v\nOutput: %s", err, out.String())
+		return "", nil, fmt.Errorf("JSON parse error from yt-dlp output: %v\nOutput: %s", err, out.String())
+	}
+
+	if data.URL == "" {
+		return "", nil, fmt.Errorf("no audio stream URL found in yt-dlp output for bestaudio format")
 	}
 
 	meta := &Metadata{
 		Title:    data.Title,
 		Uploader: data.Uploader,
 		Duration: data.Duration,
-		AudioURL: data.URL,
 		Ext:      data.Ext,
-		Abr:      data.Abr,
+		Abr:      int(data.Abr),
 	}
 
-    return data.URL, meta, nil
+	return data.URL, meta, nil
 }
 
-// Convert audio stream URL to MP3
-func convertToMP3(parentCtx context.Context, audioURL string) (string, error) {
-    token := uuid.New().String()
-    outputDir := downloadsDir
-
-	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
-		return "", err
-	}
-
-	outputPath := filepath.Join(outputDir, token+".mp3")
-
+// convertStreamToMP3 converts audio stream URL to MP3 with FFmpeg optimizations
+func convertStreamToMP3(audioURL, outputPath string) error {
 	start := time.Now()
 
-    ctx, cancel := context.WithTimeout(parentCtx, ffmpegTimeout)
-    defer cancel()
-    cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", audioURL, "-vn", "-ab", "192k", "-ar", "44100", "-f", "mp3", outputPath)
+	cmd := exec.Command("./ffmpeg",
+		"-y",
+		"-i", audioURL,
+		"-vn",
+		"-ar", "44100",
+		"-ac", "2",
+		"-b:a", "192k",
+		"-f", "mp3",
+		"-preset", "veryfast",
+		"-threads", "0",
+		outputPath,
+	)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("ffmpeg error: %v\nOutput: %s", err, out.String())
+		return fmt.Errorf("ffmpeg error: %v\nOutput: %s", err, out.String())
 	}
 
 	elapsed := time.Since(start)
-    log.Printf("⏱️ Conversion time: %.2fs", elapsed.Seconds())
+	log.Printf("⏱️ FFmpeg conversion to MP3 time: %.2fs\n", elapsed.Seconds())
 
-	return outputPath, nil
-}
-
-// Serve MP3 file download
-func handleDownload(w http.ResponseWriter, r *http.Request) {
-	enableCORS(w)
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-    if r.Method != http.MethodGet && r.Method != http.MethodHead {
-        http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
-        return
-    }
-
-    token := filepath.Base(r.URL.Path)
-    filePath := filepath.Join(downloadsDir, token)
-
-    info, err := os.Stat(filePath)
-    if err != nil {
-        if os.IsNotExist(err) {
-            http.Error(w, "File not found", http.StatusNotFound)
-            return
-        }
-        http.Error(w, "Error stating file", http.StatusInternalServerError)
-        return
-    }
-
-    file, err := os.Open(filePath)
-	if err != nil {
-		http.Error(w, "Error opening file", http.StatusInternalServerError)
-		return
-	}
-	defer file.Close()
-
-    log.Printf("⬇️  File requested for download: %s", token)
-
-    w.Header().Set("Content-Type", "audio/mpeg")
-    w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", token))
-    w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-    if r.Method == http.MethodHead {
-        return
-    }
-    io.Copy(w, file)
-}
-
-// verifyTurnstile validates a Cloudflare Turnstile token using the secret from env
-func verifyTurnstile(ctx context.Context, token string, remoteIP string) (bool, error) {
-    if turnstileSecret == "" {
-        // If not configured, reject to enforce security; change to true to disable for local testing
-        return false, fmt.Errorf("TURNSTILE_SECRET not configured")
-    }
-
-    form := url.Values{}
-    form.Set("secret", turnstileSecret)
-    form.Set("response", token)
-    if remoteIP != "" {
-        form.Set("remoteip", remoteIP)
-    }
-
-    req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://challenges.cloudflare.com/turnstile/v0/siteverify", strings.NewReader(form.Encode()))
-    if err != nil {
-        return false, err
-    }
-    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-    httpClient := &http.Client{Timeout: 10 * time.Second}
-    resp, err := httpClient.Do(req)
-    if err != nil {
-        return false, err
-    }
-    defer resp.Body.Close()
-
-    var body struct {
-        Success     bool     `json:"success"`
-        ErrorCodes  []string `json:"error-codes"`
-        ChallengeTS string   `json:"challenge_ts"`
-        Hostname    string   `json:"hostname"`
-        Action      string   `json:"action"`
-        Cdata       string   `json:"cdata"`
-    }
-
-    if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-        return false, err
-    }
-
-    if !body.Success {
-        return false, nil
-    }
-    return true, nil
-}
-
-// inferBaseURL builds the public base URL from request or override
-func inferBaseURL(r *http.Request) string {
-    if baseURLOverride != "" {
-        return strings.TrimRight(baseURLOverride, "/")
-    }
-    schemeHeader := r.Header.Get("X-Forwarded-Proto")
-    scheme := ""
-    if schemeHeader != "" {
-        parts := strings.Split(schemeHeader, ",")
-        if len(parts) > 0 {
-            scheme = strings.TrimSpace(parts[0])
-        }
-    }
-    if scheme == "" {
-        scheme = "http"
-        if r.TLS != nil {
-            scheme = "https"
-        }
-    }
-    host := r.Host
-    return fmt.Sprintf("%s://%s", scheme, host)
-}
-
-// getClientIP attempts to extract the real client IP from headers or remote addr
-func getClientIP(r *http.Request) string {
-    xff := r.Header.Get("X-Forwarded-For")
-    if xff != "" {
-        parts := strings.Split(xff, ",")
-        if len(parts) > 0 {
-            return strings.TrimSpace(parts[0])
-        }
-    }
-    xri := r.Header.Get("X-Real-IP")
-    if xri != "" {
-        return xri
-    }
-    host, _, err := net.SplitHostPort(r.RemoteAddr)
-    if err == nil {
-        return host
-    }
-    return r.RemoteAddr
-}
-
-// Helpers to read environment variables
-func getEnv(key, def string) string {
-    if v := os.Getenv(key); v != "" {
-        return v
-    }
-    return def
-}
-
-func getEnvInt(key string, def int) int {
-    if v := os.Getenv(key); v != "" {
-        if n, err := strconv.Atoi(v); err == nil {
-            return n
-        }
-    }
-    return def
-}
-
-func getEnvDuration(key string, def time.Duration) time.Duration {
-    if v := os.Getenv(key); v != "" {
-        if d, err := time.ParseDuration(v); err == nil {
-            return d
-        }
-    }
-    return def
-}
-
-func getEnvBool(key string, def bool) bool {
-    if v := os.Getenv(key); v != "" {
-        if b, err := strconv.ParseBool(v); err == nil {
-            return b
-        }
-    }
-    return def
+	return nil
 }
