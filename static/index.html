@@ -20,7 +20,7 @@
   </div>
 
   <div class="row">
-    <div class="cf-turnstile" data-sitekey="YOUR_TURNSTILE_SITE_KEY" data-callback="onTurnstile"></div>
+    <div class="cf-turnstile" data-sitekey="0x4AAAAAAB431J5L6kvD9QgM" data-callback="onTurnstile"></div>
   </div>
 
   <div class="row">
@@ -34,7 +34,7 @@
   <pre id="response"></pre>
 
   <script>
-    let captchaToken = ;
+    let captchaToken = "";
     function onTurnstile(token){
       captchaToken = token;
       document.getElementById('submit').disabled = false;
@@ -42,7 +42,7 @@
 
     function log(msg){
       const el = document.getElementById('logs');
-      el.textContent += msg + n;
+      el.textContent += msg + "\n";
     }
 
     document.getElementById('submit').addEventListener('click', async () => {
