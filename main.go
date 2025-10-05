@@ -71,6 +71,7 @@ var (
     mp3Bitrate     = getEnv("MP3_BITRATE", "128k")
     ytdlpDirect        = getEnvBool("YTDLP_DIRECT", false)            // force yt-dlp to create MP3
     ytdlpDirectFallback = getEnvBool("YTDLP_DIRECT_FALLBACK", true)   // try direct if ffmpeg fails
+    ffmpegThreads      = getEnvInt("FFMPEG_THREADS", 0)               // 0 lets ffmpeg decide
 
     // worker pool / queue
     workerCount  = getEnvInt("WORKER_COUNT", max(2, runtime.NumCPU()))
@@ -93,6 +94,8 @@ func main() {
     // Configure logger with timestamps
     log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
+    // Load config from file if present, then run preflight
+    loadConfigFromFile()
     preflight()
 
     // Routes
@@ -111,7 +114,15 @@ func main() {
 
     port := getEnv("PORT", "8080")
     log.Printf("🚀 Server running on http://localhost:%s (workers=%d, queue=%d)\n", port, workerCount, queueSize)
-    log.Fatal(http.ListenAndServe(":"+port, nil))
+    srv := &http.Server{
+        Addr:              ":" + port,
+        ReadHeaderTimeout: 5 * time.Second,
+        ReadTimeout:       15 * time.Second,
+        WriteTimeout:      20 * time.Minute,
+        IdleTimeout:       60 * time.Second,
+        Handler:           nil,
+    }
+    log.Fatal(srv.ListenAndServe())
 }
 
 // Enable CORS for browser requests
@@ -190,20 +201,34 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
     jobMu.Lock()
     if existingToken, ok := videoIDToToken[videoID]; ok {
         if job, ok2 := tokenToJob[existingToken]; ok2 {
-            // Return current state of existing job
-            resp := buildJobResponse(r, job)
-            jobMu.Unlock()
-            w.Header().Set("Content-Type", "application/json")
-            if job.Status == StatusDone {
-                w.WriteHeader(http.StatusOK)
+            // If prior job failed or file missing, drop mapping and create new job
+            if job.Status == StatusError {
+                delete(videoIDToToken, videoID)
+            } else if job.Status == StatusDone {
+                if _, err := os.Stat(job.OutputPath); err != nil {
+                    delete(videoIDToToken, videoID)
+                } else {
+                    // Return current state of existing completed job
+                    resp := buildJobResponse(r, job)
+                    jobMu.Unlock()
+                    w.Header().Set("Content-Type", "application/json")
+                    w.WriteHeader(http.StatusOK)
+                    json.NewEncoder(w).Encode(resp)
+                    return
+                }
             } else {
+                // queued/processing: return current state
+                resp := buildJobResponse(r, job)
+                jobMu.Unlock()
+                w.Header().Set("Content-Type", "application/json")
                 w.WriteHeader(http.StatusAccepted)
+                json.NewEncoder(w).Encode(resp)
+                return
             }
-            json.NewEncoder(w).Encode(resp)
-            return
+        } else {
+            // mapping stale, remove
+            delete(videoIDToToken, videoID)
         }
-        // mapping stale, remove
-        delete(videoIDToToken, videoID)
     }
 
     // Create new job
@@ -304,6 +329,10 @@ func convertToMP3(parentCtx context.Context, audioURL string, outputPath string)
         "-b:a", mp3Bitrate, "-ar", "44100",
         "-f", "mp3", outputPath,
     }
+    if ffmpegThreads > 0 {
+        // Prepend thread control after binary
+        args = append([]string{"-threads", strconv.Itoa(ffmpegThreads)}, args...)
+    }
     cmd := exec.CommandContext(ctx, ffmpegPath,
         args...,
     )
@@ -332,6 +361,9 @@ func preflight() {
     absFf, _ := filepath.Abs(ffmpegPath)
     log.Printf("🔧 Preflight: wd=%s", wd)
     log.Printf("🔧 Binaries: yt-dlp=%s ffmpeg=%s", absYt, absFf)
+    log.Printf("🔧 Config: workers=%d queue=%d bitrate=%s ttl=%s rate=%.1frps/%d burst direct=%v fallback=%v threads=%d",
+        workerCount, queueSize, mp3Bitrate, fileTTL, rateRPS, rateBurst, ytdlpDirect, ytdlpDirectFallback, ffmpegThreads,
+    )
     if err := os.MkdirAll(downloadsDir, os.ModePerm); err != nil {
         log.Printf("❌ Cannot create downloads dir %s: %v", downloadsDir, err)
     } else {
@@ -500,6 +532,7 @@ func ytdlpExtractToMP3(parentCtx context.Context, videoURL string, outputPath st
     args := []string{
         "-q", "--no-progress",
         "-x", "--audio-format", "mp3",
+        "--audio-quality", strings.TrimSuffix(mp3Bitrate, "k") + "K",
         "-o", outputPath,
         "--no-warnings", "--no-call-home", "--geo-bypass", "--ignore-config",
         videoURL,
@@ -637,6 +670,66 @@ func extractYouTubeID(raw string) string {
     }
     return raw
 }
+
+// loadConfigFromFile optionally reads config from config.json or config.yaml in cwd
+func loadConfigFromFile() {
+    // JSON first
+    if b, err := os.ReadFile("config.json"); err == nil {
+        var m map[string]string
+        if err := json.Unmarshal(b, &m); err == nil {
+            applyConfigMap(m)
+            log.Printf("🧩 Loaded config.json (%d keys)", len(m))
+            return
+        } else {
+            log.Printf("⚠️ config.json parse error: %v", err)
+        }
+    }
+    // YAML fallback (very small parser: key: value per line)
+    if b, err := os.ReadFile("config.yaml"); err == nil {
+        m := map[string]string{}
+        lines := strings.Split(string(b), "\n")
+        for _, ln := range lines {
+            ln = strings.TrimSpace(ln)
+            if ln == "" || strings.HasPrefix(ln, "#") { continue }
+            kv := strings.SplitN(ln, ":", 2)
+            if len(kv) != 2 { continue }
+            k := strings.TrimSpace(kv[0])
+            v := strings.TrimSpace(kv[1])
+            v = strings.Trim(v, "'\"")
+            m[k] = v
+        }
+        applyConfigMap(m)
+        log.Printf("🧩 Loaded config.yaml (%d keys)", len(m))
+    }
+}
+
+func applyConfigMap(m map[string]string) {
+    for k, v := range m {
+        // Do not override existing env if already set
+        if os.Getenv(k) != "" { continue }
+        _ = os.Setenv(k, v)
+    }
+    // Refresh derived config values after applying
+    ytDlpPath = getEnv("YTDLP_BIN", ytDlpPath)
+    ffmpegPath = getEnv("FFMPEG_BIN", ffmpegPath)
+    downloadsDir = getEnv("DOWNLOADS_DIR", downloadsDir)
+    baseURLOverride = os.Getenv("BASE_URL")
+    turnstileSecret = os.Getenv("TURNSTILE_SECRET")
+    turnstileTestMode = getEnvBool("TURNSTILE_TEST_MODE", turnstileTestMode)
+    ytdlpTimeout = getEnvDuration("YTDLP_TIMEOUT", ytdlpTimeout)
+    ffmpegTimeout = getEnvDuration("FFMPEG_TIMEOUT", ffmpegTimeout)
+    fileTTL = getEnvDuration("FILE_TTL", fileTTL)
+    mp3Bitrate = getEnv("MP3_BITRATE", mp3Bitrate)
+    ytdlpDirect = getEnvBool("YTDLP_DIRECT", ytdlpDirect)
+    ytdlpDirectFallback = getEnvBool("YTDLP_DIRECT_FALLBACK", ytdlpDirectFallback)
+    ffmpegThreads = getEnvInt("FFMPEG_THREADS", ffmpegThreads)
+    workerCount = getEnvInt("WORKER_COUNT", workerCount)
+    queueSize = getEnvInt("QUEUE_SIZE", queueSize)
+    rateRPS = getEnvFloat("RATE_RPS", rateRPS)
+    rateBurst = getEnvInt("RATE_BURST", rateBurst)
+}
+
+func maxDur(a, b time.Duration) time.Duration { if a > b { return a }; return b }
 
 // verifyTurnstile validates a Cloudflare Turnstile token using the secret from env
 func verifyTurnstile(ctx context.Context, token string, remoteIP string) (bool, error) {
