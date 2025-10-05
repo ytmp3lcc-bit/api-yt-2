@@ -1,7 +1,6 @@
 package main
 
 import (
-    "bytes"
     "context"
     "encoding/json"
     "fmt"
@@ -90,6 +89,8 @@ var (
 func main() {
     // Configure logger with timestamps
     log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+    preflight()
 
     // Routes
     http.HandleFunc("/extract", handleExtract)
@@ -245,13 +246,13 @@ func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metada
     defer cancel()
     args := []string{"-f", "bestaudio", "--dump-single-json", "--no-warnings", "--no-call-home", "--geo-bypass", "--ignore-config", videoURL}
     cmd := exec.CommandContext(ctx, ytDlpPath, args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	if err := cmd.Run(); err != nil {
-		return "", nil, fmt.Errorf("yt-dlp failed: %v\nOutput: %s", err, out.String())
-	}
+    if wd, err := os.Getwd(); err == nil { cmd.Dir = wd }
+    log.Printf("▶️ Running yt-dlp: %s %s", ytDlpPath, strings.Join(args, " "))
+    log.Printf("   cwd=%s PATH=%s", cmd.Dir, os.Getenv("PATH"))
+    out, err := cmd.CombinedOutput()
+    if err != nil {
+        return "", nil, fmt.Errorf("yt-dlp failed: %v\nCommand: %s %s\nOutput:\n%s", err, ytDlpPath, strings.Join(args, " "), string(out))
+    }
 
 	var data struct {
 		Title    string  `json:"title"`
@@ -262,8 +263,8 @@ func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metada
 		Abr      int     `json:"abr"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &data); err != nil {
-		return "", nil, fmt.Errorf("JSON parse error: %v\nOutput: %s", err, out.String())
+    if err := json.Unmarshal(out, &data); err != nil {
+        return "", nil, fmt.Errorf("JSON parse error: %v\nOutput: %s", err, string(out))
 	}
 
 	meta := &Metadata{
@@ -275,6 +276,7 @@ func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metada
 		Abr:      data.Abr,
 	}
 
+    log.Printf("✅ yt-dlp OK: title=%q uploader=%q duration=%.0fs", meta.Title, meta.Uploader, meta.Duration)
     return data.URL, meta, nil
 }
 
@@ -289,23 +291,53 @@ func convertToMP3(parentCtx context.Context, audioURL string, outputPath string)
     ctx, cancel := context.WithTimeout(parentCtx, ffmpegTimeout)
     defer cancel()
     // Use libmp3lame, lower bitrate to reduce CPU, hide banner for speed
-    cmd := exec.CommandContext(ctx, ffmpegPath,
+    args := []string{
         "-nostdin", "-hide_banner", "-loglevel", "error",
         "-y", "-i", audioURL, "-vn",
         "-b:a", mp3Bitrate, "-ar", "44100",
         "-f", "mp3", outputPath,
+    }
+    cmd := exec.CommandContext(ctx, ffmpegPath,
+        args...,
     )
-    var out bytes.Buffer
-    cmd.Stdout = &out
-    cmd.Stderr = &out
-
-    if err := cmd.Run(); err != nil {
-        return fmt.Errorf("ffmpeg error: %v\nOutput: %s", err, out.String())
+    if wd, err := os.Getwd(); err == nil { cmd.Dir = wd }
+    log.Printf("▶️ Running ffmpeg: %s %s", ffmpegPath, strings.Join(args, " "))
+    log.Printf("   cwd=%s PATH=%s", cmd.Dir, os.Getenv("PATH"))
+    out, err := cmd.CombinedOutput()
+    if err != nil {
+        return fmt.Errorf("ffmpeg error: %v\nCommand: %s %s\nOutput:\n%s", err, ffmpegPath, strings.Join(args, " "), string(out))
     }
 
     elapsed := time.Since(start)
     log.Printf("⏱️ Conversion time: %.2fs", elapsed.Seconds())
+    if fi, err := os.Stat(outputPath); err == nil {
+        log.Printf("💾 Saved: %s (%d bytes)", outputPath, fi.Size())
+    } else {
+        log.Printf("⚠️ Expected output missing: %s (err=%v)", outputPath, err)
+    }
     return nil
+}
+
+// Preflight checks for environment and permissions
+func preflight() {
+    wd, _ := os.Getwd()
+    absYt, _ := filepath.Abs(ytDlpPath)
+    absFf, _ := filepath.Abs(ffmpegPath)
+    log.Printf("🔧 Preflight: wd=%s", wd)
+    log.Printf("🔧 Binaries: yt-dlp=%s ffmpeg=%s", absYt, absFf)
+    if err := os.MkdirAll(downloadsDir, os.ModePerm); err != nil {
+        log.Printf("❌ Cannot create downloads dir %s: %v", downloadsDir, err)
+    } else {
+        // write test file to confirm permissions
+        testFile := filepath.Join(downloadsDir, ".perm_test")
+        _ = os.WriteFile(testFile, []byte("ok"), 0644)
+        if fi, err := os.Stat(testFile); err == nil {
+            log.Printf("🔐 Downloads writable: %s (%d bytes)", testFile, fi.Size())
+            _ = os.Remove(testFile)
+        } else {
+            log.Printf("❌ Downloads not writable: %v", err)
+        }
+    }
 }
 
 // Serve MP3 file download
