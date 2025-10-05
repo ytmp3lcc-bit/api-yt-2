@@ -50,6 +50,7 @@ var (
     downloadsDir    = getEnv("DOWNLOADS_DIR", "downloads")
     baseURLOverride = os.Getenv("BASE_URL") // optional, e.g., https://api.example.com
     turnstileSecret = os.Getenv("TURNSTILE_SECRET")
+    turnstileTestMode = getEnvBool("TURNSTILE_TEST_MODE", false)
 
     ytdlpTimeout  = getEnvDuration("YTDLP_TIMEOUT", 60*time.Second)
     ffmpegTimeout = getEnvDuration("FFMPEG_TIMEOUT", 8*time.Minute)
@@ -114,8 +115,11 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 	}
 
     if req.CaptchaToken == "" {
-        http.Error(w, "Missing captcha_token", http.StatusBadRequest)
-        return
+        if !turnstileTestMode {
+            http.Error(w, "Missing captcha_token", http.StatusBadRequest)
+            return
+        }
+        log.Printf("⚠️  TURNSTILE_TEST_MODE enabled: proceeding without captcha_token")
     }
 
 	// 🟢 Log: URL received
@@ -130,21 +134,25 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Verify Cloudflare Turnstile before processing
-    clientIP := getClientIP(r)
-    log.Printf("🛡️ Verifying Turnstile token for IP=%s...", clientIP)
-    ok, err := verifyTurnstile(r.Context(), req.CaptchaToken, clientIP)
-    if err != nil {
-        log.Printf("❌ Turnstile verification error: %v", err)
-        http.Error(w, "Captcha verification error", http.StatusInternalServerError)
-        return
+    // Verify Cloudflare Turnstile before processing (unless test mode)
+    if !turnstileTestMode {
+        clientIP := getClientIP(r)
+        log.Printf("🛡️ Verifying Turnstile token for IP=%s...", clientIP)
+        ok, err := verifyTurnstile(r.Context(), req.CaptchaToken, clientIP)
+        if err != nil {
+            log.Printf("❌ Turnstile verification error: %v", err)
+            http.Error(w, "Captcha verification error", http.StatusInternalServerError)
+            return
+        }
+        if !ok {
+            log.Printf("❌ Turnstile verification failed")
+            http.Error(w, "Captcha verification failed", http.StatusBadRequest)
+            return
+        }
+        log.Printf("✅ Turnstile verified")
+    } else {
+        log.Printf("🧪 TURNSTILE_TEST_MODE enabled: skipping Turnstile verification")
     }
-    if !ok {
-        log.Printf("❌ Turnstile verification failed")
-        http.Error(w, "Captcha verification failed", http.StatusBadRequest)
-        return
-    }
-    log.Printf("✅ Turnstile verified")
 
     // 1️⃣ Extract direct audio stream URL via yt-dlp
     log.Printf("🔍 Step 1: Extracting audio stream…")
@@ -387,6 +395,21 @@ func getEnvDuration(key string, def time.Duration) time.Duration {
     if v := os.Getenv(key); v != "" {
         if d, err := time.ParseDuration(v); err == nil {
             return d
+        }
+    }
+    return def
+}
+
+func getEnvBool(key string, def bool) bool {
+    if v := os.Getenv(key); v != "" {
+        if b, err := strconv.ParseBool(v); err == nil {
+            return b
+        }
+        switch strings.ToLower(v) {
+        case "1", "true", "yes", "on", "y":
+            return true
+        case "0", "false", "no", "off", "n":
+            return false
         }
     }
     return def
