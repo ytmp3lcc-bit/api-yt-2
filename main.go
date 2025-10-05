@@ -1,6 +1,7 @@
 package main
 
 import (
+    "bytes"
     "context"
     "encoding/json"
     "fmt"
@@ -68,6 +69,8 @@ var (
     ffmpegTimeout = getEnvDuration("FFMPEG_TIMEOUT", 8*time.Minute)
     fileTTL        = getEnvDuration("FILE_TTL", 15*time.Minute)
     mp3Bitrate     = getEnv("MP3_BITRATE", "128k")
+    ytdlpDirect        = getEnvBool("YTDLP_DIRECT", false)            // force yt-dlp to create MP3
+    ytdlpDirectFallback = getEnvBool("YTDLP_DIRECT_FALLBACK", true)   // try direct if ffmpeg fails
 
     // worker pool / queue
     workerCount  = getEnvInt("WORKER_COUNT", max(2, runtime.NumCPU()))
@@ -244,14 +247,18 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metadata, error) {
     ctx, cancel := context.WithTimeout(parentCtx, ytdlpTimeout)
     defer cancel()
-    args := []string{"-f", "bestaudio", "--dump-single-json", "--no-warnings", "--no-call-home", "--geo-bypass", "--ignore-config", videoURL}
+    args := []string{"-q", "--no-progress", "-f", "bestaudio", "--dump-single-json", "--no-warnings", "--no-call-home", "--geo-bypass", "--ignore-config", videoURL}
     cmd := exec.CommandContext(ctx, ytDlpPath, args...)
     if wd, err := os.Getwd(); err == nil { cmd.Dir = wd }
     log.Printf("▶️ Running yt-dlp: %s %s", ytDlpPath, strings.Join(args, " "))
     log.Printf("   cwd=%s PATH=%s", cmd.Dir, os.Getenv("PATH"))
-    out, err := cmd.CombinedOutput()
+    var stdout, stderr bytes.Buffer
+    cmd.Stdout = &stdout
+    cmd.Stderr = &stderr
+    err := cmd.Run()
+    out := stdout.Bytes()
     if err != nil {
-        return "", nil, fmt.Errorf("yt-dlp failed: %v\nCommand: %s %s\nOutput:\n%s", err, ytDlpPath, strings.Join(args, " "), string(out))
+        return "", nil, fmt.Errorf("yt-dlp failed: %v\nCommand: %s %s\nStdout:\n%s\nStderr:\n%s", err, ytDlpPath, strings.Join(args, " "), stdout.String(), stderr.String())
     }
 
 	var data struct {
@@ -264,7 +271,7 @@ func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metada
 	}
 
     if err := json.Unmarshal(out, &data); err != nil {
-        return "", nil, fmt.Errorf("JSON parse error: %v\nOutput: %s", err, string(out))
+        return "", nil, fmt.Errorf("JSON parse error: %v\nStdout: %s\nStderr: %s", err, string(out), stderr.String())
 	}
 
 	meta := &Metadata{
@@ -452,7 +459,16 @@ func worker(id int, queue <-chan string) {
         ctx := context.Background()
         audioURL, meta, err := getAudioStream(ctx, job.VideoURL)
         if err == nil {
-            err = convertToMP3(ctx, audioURL, job.OutputPath)
+            if ytdlpDirect {
+                log.Printf("👷 worker-%d using yt-dlp direct extraction to MP3", id)
+                err = ytdlpExtractToMP3(ctx, job.VideoURL, job.OutputPath)
+            } else {
+                err = convertToMP3(ctx, audioURL, job.OutputPath)
+                if err != nil && ytdlpDirectFallback {
+                    log.Printf("👷 worker-%d ffmpeg failed, trying yt-dlp direct fallback: %v", id, err)
+                    err = ytdlpExtractToMP3(ctx, job.VideoURL, job.OutputPath)
+                }
+            }
         }
 
         jobMu.Lock()
@@ -471,6 +487,39 @@ func worker(id int, queue <-chan string) {
         }
         jobMu.Unlock()
     }
+}
+
+// ytdlpExtractToMP3 lets yt-dlp handle conversion to MP3 directly
+func ytdlpExtractToMP3(parentCtx context.Context, videoURL string, outputPath string) error {
+    if err := os.MkdirAll(filepath.Dir(outputPath), os.ModePerm); err != nil {
+        return err
+    }
+    // Use a longer timeout since this includes download + convert
+    ctx, cancel := context.WithTimeout(parentCtx, maxDur(ffmpegTimeout, 12*time.Minute))
+    defer cancel()
+    args := []string{
+        "-q", "--no-progress",
+        "-x", "--audio-format", "mp3",
+        "-o", outputPath,
+        "--no-warnings", "--no-call-home", "--geo-bypass", "--ignore-config",
+        videoURL,
+    }
+    cmd := exec.CommandContext(ctx, ytDlpPath, args...)
+    if wd, err := os.Getwd(); err == nil { cmd.Dir = wd }
+    log.Printf("▶️ Running yt-dlp (direct): %s %s", ytDlpPath, strings.Join(args, " "))
+    log.Printf("   cwd=%s PATH=%s", cmd.Dir, os.Getenv("PATH"))
+    var stdout, stderr bytes.Buffer
+    cmd.Stdout = &stdout
+    cmd.Stderr = &stderr
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("yt-dlp direct failed: %v\nStdout:\n%s\nStderr:\n%s", err, stdout.String(), stderr.String())
+    }
+    if fi, err := os.Stat(outputPath); err == nil {
+        log.Printf("💾 yt-dlp direct saved: %s (%d bytes)", outputPath, fi.Size())
+    } else {
+        log.Printf("⚠️ yt-dlp direct expected output missing: %s (err=%v)", outputPath, err)
+    }
+    return nil
 }
 
 func buildJobResponse(r *http.Request, job *Job) JobResponse {
