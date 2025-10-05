@@ -1,0 +1,22 @@
+{
+  "WORKER_COUNT": "16",
+  "QUEUE_SIZE": "5000",
+  "MP3_BITRATE": "128k",
+  "FILE_TTL": "15m",
+  "RATE_RPS": "10",
+  "RATE_BURST": "30",
+  "TURNSTILE_SECRET": "0x4AAAAAAB431Fxr6XO_dXzh478HCqtQxm0",
+  "TURNSTILE_TEST_MODE": "false",
+  "BASE_URL": "http://localhost:8080",
+  "YTDLP_BIN": ".\\yt-dlp.exe",
+  "FFMPEG_BIN": ".\\ffmpeg.exe",
+  "DOWNLOADS_DIR": "downloads",
+  "YTDLP_DIRECT_FALLBACK": "true",
+  "YTDLP_DIRECT": "true",
+  "FFMPEG_THREADS": "0",
+  "YTDLP_FORCE_IPV4": "true",
+  "YTDLP_RETRIES": "10",
+  "YTDLP_SOCKET_TIMEOUT": "15",
+  "YTDLP_CONCURRENT_FRAGMENTS": "4",
+   "PORT": "8080"
+}
