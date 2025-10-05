@@ -45,8 +45,8 @@ type Response struct {
 
 // Global configuration populated from environment variables
 var (
-    ytDlpPath       = getEnv("YTDLP_BIN", "./yt-dlp")
-    ffmpegPath      = getEnv("FFMPEG_BIN", "./ffmpeg")
+    ytDlpPath       = getEnv("YTDLP_BIN", "yt-dlp")
+    ffmpegPath      = getEnv("FFMPEG_BIN", "ffmpeg")
     downloadsDir    = getEnv("DOWNLOADS_DIR", "downloads")
     baseURLOverride = os.Getenv("BASE_URL") // optional, e.g., https://api.example.com
     turnstileSecret = os.Getenv("TURNSTILE_SECRET")
@@ -121,16 +121,7 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 	// 🟢 Log: URL received
     log.Printf("\n🎬 Received URL: %s\n", videoURL)
 
-    // Concurrency limiting: fail fast if saturated
-    select {
-    case sem <- struct{}{}:
-        defer func() { <-sem }()
-    default:
-        http.Error(w, "Server busy, try again later", http.StatusTooManyRequests)
-        return
-    }
-
-    // Verify Cloudflare Turnstile before processing
+    // Verify Cloudflare Turnstile before heavy processing
     clientIP := getClientIP(r)
     log.Printf("🛡️ Verifying Turnstile token for IP=%s...", clientIP)
     ok, err := verifyTurnstile(r.Context(), req.CaptchaToken, clientIP)
@@ -145,6 +136,15 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
         return
     }
     log.Printf("✅ Turnstile verified")
+
+    // Concurrency limiting: acquire slot only for heavy work
+    select {
+    case sem <- struct{}{}:
+        defer func() { <-sem }()
+    default:
+        http.Error(w, "Server busy, try again later", http.StatusTooManyRequests)
+        return
+    }
 
     // 1️⃣ Extract direct audio stream URL via yt-dlp
     log.Printf("🔍 Step 1: Extracting audio stream…")
@@ -189,7 +189,7 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 func getAudioStream(parentCtx context.Context, videoURL string) (string, *Metadata, error) {
     ctx, cancel := context.WithTimeout(parentCtx, ytdlpTimeout)
     defer cancel()
-    cmd := exec.CommandContext(ctx, ytDlpPath, "-f", "bestaudio", "--dump-single-json", "--no-warnings", videoURL)
+    cmd := exec.CommandContext(ctx, ytDlpPath, "-f", "bestaudio", "--no-playlist", "--dump-single-json", "--no-warnings", videoURL)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -262,15 +262,25 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+    if r.Method != http.MethodGet && r.Method != http.MethodHead {
+        http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+        return
+    }
+
     token := filepath.Base(r.URL.Path)
     filePath := filepath.Join(downloadsDir, token)
 
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		http.Error(w, "File not found", http.StatusNotFound)
-		return
-	}
+    info, err := os.Stat(filePath)
+    if err != nil {
+        if os.IsNotExist(err) {
+            http.Error(w, "File not found", http.StatusNotFound)
+            return
+        }
+        http.Error(w, "Error stating file", http.StatusInternalServerError)
+        return
+    }
 
-	file, err := os.Open(filePath)
+    file, err := os.Open(filePath)
 	if err != nil {
 		http.Error(w, "Error opening file", http.StatusInternalServerError)
 		return
@@ -279,9 +289,13 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 
     log.Printf("⬇️  File requested for download: %s", token)
 
-	w.Header().Set("Content-Type", "audio/mpeg")
+    w.Header().Set("Content-Type", "audio/mpeg")
     w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", token))
-	io.Copy(w, file)
+    w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+    if r.Method == http.MethodHead {
+        return
+    }
+    io.Copy(w, file)
 }
 
 // verifyTurnstile validates a Cloudflare Turnstile token using the secret from env
@@ -335,7 +349,14 @@ func inferBaseURL(r *http.Request) string {
     if baseURLOverride != "" {
         return strings.TrimRight(baseURLOverride, "/")
     }
-    scheme := r.Header.Get("X-Forwarded-Proto")
+    schemeHeader := r.Header.Get("X-Forwarded-Proto")
+    scheme := ""
+    if schemeHeader != "" {
+        parts := strings.Split(schemeHeader, ",")
+        if len(parts) > 0 {
+            scheme = strings.TrimSpace(parts[0])
+        }
+    }
     if scheme == "" {
         scheme = "http"
         if r.TLS != nil {
