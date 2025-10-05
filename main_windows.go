@@ -577,7 +577,19 @@ func getAudioStreamFromYTDLP(videoURL string) (string, *Metadata, error) {
 		return "", nil, fmt.Errorf("yt-dlp not found. Please install yt-dlp first")
 	}
 
-	cmd = exec.Command("yt-dlp", "-f", "bestaudio", "--dump-json", "--no-warnings", videoURL)
+	// Use enhanced yt-dlp command with better bot detection avoidance
+	cmd = exec.Command("yt-dlp", 
+		"-f", "bestaudio",
+		"--dump-json", 
+		"--no-warnings",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+		"--referer", "https://www.youtube.com/",
+		"--add-header", "Accept-Language:en-US,en;q=0.9",
+		"--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"--sleep-requests", "1",
+		"--sleep-interval", "1",
+		"--max-sleep-interval", "3",
+		videoURL)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
