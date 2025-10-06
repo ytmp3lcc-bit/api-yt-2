@@ -58,10 +58,11 @@
         });
         const data = await res.json();
         document.getElementById('response').textContent = JSON.stringify(data, null, 2);
-        if(data.download_endpoint){
-          log('Download: ' + data.download_endpoint);
+        const dl = data.download_url || data.download_endpoint;
+        if(dl){
+          log('Download: ' + dl);
         } else {
-          log('No download endpoint returned.');
+          log('No download URL returned.');
         }
       }catch(err){
         log('Error: ' + err.message);
