@@ -1,25 +1,23 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"strconv"
-	"sync"
-	"sync/atomic"
-	"syscall"
-	"time"
+    "context"
+    "encoding/json"
+    "fmt"
+    "io"
+    "log"
+    "net/http"
+    "os"
+    "os/signal"
+    "path/filepath"
+    "sync"
+    "sync/atomic"
+    "syscall"
+    "time"
 
-	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
-	"golang.org/x/time/rate"
+    "github.com/google/uuid"
+    "github.com/redis/go-redis/v9"
+    "golang.org/x/time/rate"
 )
 
 // --- Enhanced Data Structures ---
@@ -97,8 +95,11 @@ const (
 	// Job Expiration
 	JobExpirationHours = 24    // Jobs expire after 24 hours
 	
-	// Health Check
-	HealthCheckInterval = 30 * time.Second
+    // Health Check
+    HealthCheckInterval = 30 * time.Second
+    
+    // Fast-path response: wait up to this duration for a job to finish
+    FastPathWait = 8 * time.Second
 )
 
 // --- Global Variables ---
@@ -129,6 +130,12 @@ var (
 	// Context for graceful shutdown
 	ctx, cancel = context.WithCancel(context.Background())
 )
+
+// Waiters notified when a job reaches a terminal state (completed or failed).
+var jobWaiters = struct {
+    sync.Mutex
+    m map[string][]chan *ConversionJob
+}{ m: make(map[string][]chan *ConversionJob) }
 
 // --- Main Server Setup ---
 func main() {
@@ -289,25 +296,50 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 	saveJobToRedis(job)
 	atomic.AddInt64(&queuedJobs, 1)
 
-	// Add job to the queue
-	select {
-	case jobQueue <- job:
-		fmt.Printf("✅ Job %s added to queue for URL: %s\n", jobID, req.URL)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"job_id": jobID,
-			"status": string(job.Status),
-			"check_status_endpoint": fmt.Sprintf("http://localhost:8080/status/%s", jobID),
-		})
-	default:
-		// Queue is full
-		jobStore.Lock()
-		delete(jobStore.jobs, jobID)
-		jobStore.Unlock()
-		atomic.AddInt64(&queuedJobs, -1)
-		http.Error(w, "Server busy, please try again later.", http.StatusServiceUnavailable)
-		fmt.Printf("❌ Job %s for URL %s rejected, queue full.\n", jobID, req.URL)
-	}
+    // Register a waiter to enable fast-path response if the job finishes quickly
+    resultCh := registerJobWaiter(jobID)
+    // Add job to the queue
+    select {
+    case jobQueue <- job:
+        fmt.Printf("✅ Job %s added to queue for URL: %s\n", jobID, req.URL)
+        w.Header().Set("Content-Type", "application/json")
+        // Wait briefly to see if the job completes quickly
+        select {
+        case doneJob := <-resultCh:
+            if doneJob.Status == StatusCompleted {
+                json.NewEncoder(w).Encode(map[string]string{
+                    "job_id": jobID,
+                    "status": string(doneJob.Status),
+                    "download_url": doneJob.DownloadURL,
+                    "check_status_endpoint": fmt.Sprintf("http://localhost:8080/status/%s", jobID),
+                })
+            } else {
+                json.NewEncoder(w).Encode(map[string]interface{}{
+                    "job_id": jobID,
+                    "status": string(doneJob.Status),
+                    "error": doneJob.Error,
+                    "check_status_endpoint": fmt.Sprintf("http://localhost:8080/status/%s", jobID),
+                })
+            }
+        case <-time.After(FastPathWait):
+            // Timed out waiting; unregister waiter to avoid leaks
+            unregisterJobWaiter(jobID, resultCh)
+            json.NewEncoder(w).Encode(map[string]string{
+                "job_id": jobID,
+                "status": string(job.Status),
+                "check_status_endpoint": fmt.Sprintf("http://localhost:8080/status/%s", jobID),
+            })
+        }
+    default:
+        // Queue is full
+        unregisterJobWaiter(jobID, resultCh)
+        jobStore.Lock()
+        delete(jobStore.jobs, jobID)
+        jobStore.Unlock()
+        atomic.AddInt64(&queuedJobs, -1)
+        http.Error(w, "Server busy, please try again later.", http.StatusServiceUnavailable)
+        fmt.Printf("❌ Job %s for URL %s rejected, queue full.\n", jobID, req.URL)
+    }
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -324,18 +356,18 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try Redis first, then memory
-	job, err := getJobFromRedis(jobID)
-	if err != nil || job == nil {
-		jobStore.RLock()
-		job, exists := jobStore.jobs[jobID]
-		jobStore.RUnlock()
-		
-		if !exists {
-			http.Error(w, "Job not found", http.StatusNotFound)
-			return
-		}
-	}
+    // Try Redis first, then memory
+    job, err := getJobFromRedis(jobID)
+    if err != nil || job == nil {
+        jobStore.RLock()
+        jobMem, exists := jobStore.jobs[jobID]
+        jobStore.RUnlock()
+        if !exists {
+            http.Error(w, "Job not found", http.StatusNotFound)
+            return
+        }
+        job = jobMem
+    }
 
 	response := struct {
 		JobID        string    `json:"job_id"`
@@ -529,6 +561,44 @@ func processJob(job *ConversionJob, workerID int) {
 }
 
 // --- Helper Functions ---
+// --- Job completion waiter management ---
+func registerJobWaiter(jobID string) chan *ConversionJob {
+    ch := make(chan *ConversionJob, 1)
+    jobWaiters.Lock()
+    jobWaiters.m[jobID] = append(jobWaiters.m[jobID], ch)
+    jobWaiters.Unlock()
+    return ch
+}
+
+func notifyJobCompletion(job *ConversionJob) {
+    jobWaiters.Lock()
+    waiters := jobWaiters.m[job.ID]
+    delete(jobWaiters.m, job.ID)
+    jobWaiters.Unlock()
+    for _, ch := range waiters {
+        select {
+        case ch <- job:
+        default:
+        }
+        close(ch)
+    }
+}
+
+func unregisterJobWaiter(jobID string, ch chan *ConversionJob) {
+    jobWaiters.Lock()
+    defer jobWaiters.Unlock()
+    waiters := jobWaiters.m[jobID]
+    for i, c := range waiters {
+        if c == ch {
+            jobWaiters.m[jobID] = append(waiters[:i], waiters[i+1:]...)
+            break
+        }
+    }
+    if len(jobWaiters.m[jobID]) == 0 {
+        delete(jobWaiters.m, jobID)
+    }
+    close(ch)
+}
 func updateJobStatus(job *ConversionJob, status JobStatus, errMsg string) {
 	job.Status = status
 	job.Error = errMsg
@@ -557,10 +627,12 @@ func handleJobFailure(job *ConversionJob, err error, stage string) {
 			atomic.AddInt64(&queuedJobs, 1)
 		default:
 			updateJobStatus(job, StatusFailed, fmt.Sprintf("%s: %v. Max retries exceeded and queue full.", stage, err))
+			notifyJobCompletion(job)
 		}
-	} else {
-		updateJobStatus(job, StatusFailed, fmt.Sprintf("%s: %v. Max retries (%d) exceeded.", stage, err, job.MaxRetries))
-	}
+    } else {
+        updateJobStatus(job, StatusFailed, fmt.Sprintf("%s: %v. Max retries (%d) exceeded.", stage, err, job.MaxRetries))
+        notifyJobCompletion(job)
+    }
 }
 
 func findJobByURL(url string) *ConversionJob {
