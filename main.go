@@ -94,7 +94,7 @@ func main() {
 	http.HandleFunc("/download/", handleDownload)
 
 	fmt.Printf("🚀 Server running on http://localhost:8080 with %d workers\n", WorkerPoolSize)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(":8081", nil))
 }
 
 // Enable CORS for browser requests
@@ -152,7 +152,7 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{
 			"job_id": jobID,
 			"status": string(job.Status),
-			"check_status_endpoint": fmt.Sprintf("http://localhost:8080/status/%s", jobID),
+			"check_status_endpoint": fmt.Sprintf("http://localhost:8081/status/%s", jobID),
 		})
 	default:
 		// Queue is full
@@ -296,7 +296,7 @@ func processJob(job *ConversionJob, workerID int) {
 	job.Status = StatusCompleted
 	job.CompletedAt = time.Now()
 	job.FilePath = outputPath
-	job.DownloadURL = fmt.Sprintf("http://localhost:8080/download/%s.mp3", job.ID)
+	job.DownloadURL = fmt.Sprintf("http://localhost:8081/download/%s.mp3", job.ID)
 	job.Metadata = meta
 	job.Error = "" // Clear any previous errors
 	jobStore.Unlock()
