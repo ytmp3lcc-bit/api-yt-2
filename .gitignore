@@ -1,0 +1,28 @@
+# Go
+bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Local binaries
+ytmp3
+ytmp3-api
+
+# Downloads and logs
+/downloads/
+/logs/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS junk
+.DS_Store
+Thumbs.db
