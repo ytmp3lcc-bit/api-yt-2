@@ -9,6 +9,7 @@ BIN_PATH="/usr/local/bin/${APP_NAME}"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 NGINX_SITE="/etc/nginx/sites-available/${APP_NAME}.conf"
 NGINX_LINK="/etc/nginx/sites-enabled/${APP_NAME}.conf"
+NGINX_LIMITS="/etc/nginx/conf.d/${APP_NAME}-limits.conf"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Please run as root" >&2
@@ -76,10 +77,10 @@ Group=ytmp3
 ExecStart=/usr/local/bin/ytmp3-api
 WorkingDirectory=/var/lib/ytmp3-api
 Environment=REDIS_ADDR=localhost:6379
-Environment=REQUESTS_PER_SECOND=100
-Environment=BURST_SIZE=200
-Environment=WORKER_POOL_SIZE=20
-Environment=JOB_QUEUE_CAPACITY=1000
+Environment=REQUESTS_PER_SECOND=${REQUESTS_PER_SECOND}
+Environment=BURST_SIZE=${BURST_SIZE}
+Environment=WORKER_POOL_SIZE=${WORKER_POOL_SIZE}
+Environment=JOB_QUEUE_CAPACITY=${JOB_QUEUE_CAPACITY}
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536
@@ -97,10 +98,10 @@ else
 #!/usr/bin/env bash
 set -euo pipefail
 export REDIS_ADDR=localhost:6379
-export REQUESTS_PER_SECOND=100
-export BURST_SIZE=200
-export WORKER_POOL_SIZE=20
-export JOB_QUEUE_CAPACITY=1000
+export REQUESTS_PER_SECOND=${REQUESTS_PER_SECOND}
+export BURST_SIZE=${BURST_SIZE}
+export WORKER_POOL_SIZE=${WORKER_POOL_SIZE}
+export JOB_QUEUE_CAPACITY=${JOB_QUEUE_CAPACITY}
 cd /var/lib/ytmp3-api
 nohup /usr/local/bin/ytmp3-api >/var/lib/ytmp3-api/ytmp3-api.log 2>&1 &
 echo $! > /var/lib/ytmp3-api/ytmp3-api.pid
@@ -110,42 +111,83 @@ EOF
   /usr/local/bin/${APP_NAME}-run || true
 fi
 
-# Nginx site
-cat >"${NGINX_SITE}" <<'EOF'
+# Interactive options and Nginx configuration
+ask_yes_no() {
+  local prompt="$1"; local default=${2:-Y}; local reply; local suffix="[Y/n]"; [[ "$default" == "N" ]] && suffix="[y/N]"
+  while true; do
+    read -r -p "$prompt $suffix " reply || reply=""
+    [[ -z "$reply" ]] && reply="$default"
+    case "$reply" in
+      Y|y|yes|YES) return 0;;
+      N|n|no|NO) return 1;;
+      *) echo "Please answer yes or no.";;
+    esac
+  done
+}
+
+read_with_default() {
+  local prompt="$1"; local def="$2"; local var
+  read -r -p "$prompt [$def]: " var || var=""
+  echo "${var:-$def}"
+}
+
+WORKER_POOL_SIZE=$(read_with_default "Worker pool size" "20")
+JOB_QUEUE_CAPACITY=$(read_with_default "Job queue capacity" "1000")
+REQUESTS_PER_SECOND=$(read_with_default "App rate limit (req/s)" "100")
+BURST_SIZE=$(read_with_default "App rate burst" "200")
+
+if ask_yes_no "Configure Nginx reverse proxy (domain or IP)?" Y; then
+  DOMAIN=$(read_with_default "Enter domain (blank = use server IP)" "")
+  # Global limits (http context)
+  cat >"${NGINX_LIMITS}" <<'EOF'
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=download_limit:10m rate=5r/s;
+limit_conn_zone $binary_remote_addr zone=conn_limit_per_ip:10m;
+EOF
+
+  # Server block
+  cat >"${NGINX_SITE}" <<EOF
 server {
     listen 80;
-    server_name _;
+    server_name ${DOMAIN:-_};
 
-    # Basic security headers
     add_header X-Frame-Options DENY;
     add_header X-Content-Type-Options nosniff;
-
-    # Rate limiting
-    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
 
     location /health { proxy_pass http://127.0.0.1:8080; }
 
     location /extract {
         limit_req zone=api_limit burst=20 nodelay;
+        limit_conn conn_limit_per_ip 20;
         proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
     location /status/ { proxy_pass http://127.0.0.1:8080; }
-    location /download/ { proxy_pass http://127.0.0.1:8080; }
+    location /download/ {
+        limit_req zone=download_limit burst=10 nodelay;
+        proxy_pass http://127.0.0.1:8080;
+    }
     location /metrics { allow 127.0.0.1; deny all; proxy_pass http://127.0.0.1:8080; }
     location / { proxy_pass http://127.0.0.1:8080; }
 }
 EOF
 
-ln -sf "${NGINX_SITE}" "${NGINX_LINK}"
-if [[ "${HAS_SYSTEMD}" == "true" ]]; then
-  nginx -t && systemctl reload nginx
-else
-  nginx -t && nginx -s reload || true
+  ln -sf "${NGINX_SITE}" "${NGINX_LINK}"
+  if [[ "${HAS_SYSTEMD}" == "true" ]]; then
+    nginx -t && systemctl reload nginx
+  else
+    nginx -t && nginx -s reload || true
+  fi
+
+  if [[ -n "${DOMAIN}" ]] && ask_yes_no "Enable HTTPS for ${DOMAIN} with Let's Encrypt?" N; then
+    EMAIL=$(read_with_default "Admin email for Let's Encrypt" "you@example.com")
+    apt-get install -y certbot python3-certbot-nginx
+    certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos -m "${EMAIL}" --redirect || true
+  fi
 fi
 
 # Redis enable and start
