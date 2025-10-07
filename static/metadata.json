@@ -1,0 +1,7 @@
+{
+  "name": "YTMP3 - Free YouTube to MP3 Converter",
+  "description": "A fast, free, and easy-to-use web application to convert YouTube videos to high-quality MP3 audio files.",
+  "requestFramePermissions": [
+    "clipboard-read"
+  ]
+}

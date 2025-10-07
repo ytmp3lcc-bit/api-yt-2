@@ -1,0 +1,253 @@
+
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DMCA Policy | YTMP3</title>
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#DC2626">
+    
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="Read the DMCA Takedown Policy for YTMP3. We respect intellectual property rights and provide a process for copyright owners to report infringement.">
+    <meta name="keywords" content="dmca policy, copyright infringement, takedown notice, ytmp3 dmca">
+    <link rel="canonical" href="https://ytmp3l.cc/dmca.html" />
+    <meta name="robots" content="index, follow">
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://ytmp3l.cc/dmca.html">
+    <meta property="og:title" content="DMCA Policy | YTMP3">
+    <meta property="og:description" content="Read the DMCA Takedown Policy for YTMP3.">
+    <meta property="og:image" content="https://ytmp3l.cc/social-share-image.png">
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:url" content="https://ytmp3l.cc/dmca.html">
+    <meta property="twitter:title" content="DMCA Policy | YTMP3">
+    <meta property="twitter:description" content="Read the DMCA Takedown Policy for YTMP3.">
+    <meta property="twitter:image" content="https://ytmp3l.cc/social-share-image.png">
+
+    <script>
+        // Prevents theme flash
+        (function() {
+            const theme = localStorage.getItem('theme') || 'dark';
+            if (theme === 'light') {
+                document.documentElement.classList.remove('dark');
+            } else {
+                document.documentElement.classList.add('dark');
+            }
+        })();
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        'dark-bg': '#1A1B1E',
+                        'dark-header': '#212225',
+                        'dark-surface': '#2C2D30',
+                        'dark-surface-light': '#242528',
+                        'dark-border': '#3A3B3F',
+                        'dark-text': '#F5F5F5',
+                        'dark-text-secondary': '#A8A8B3',
+                        'dark-text-placeholder': '#6A6B70',
+                        'dark-link': '#ff8a80',
+                        'dark-link-hover': '#ff5252',
+                        'dark-button-secondary-bg': '#36373A',
+                        'dark-button-secondary-hover': '#4A4B4F',
+                        'light-bg': '#F0F2F5',
+                        'light-header': '#FFFFFF',
+                        'light-surface': '#FFFFFF',
+                        'light-surface-light': '#E9ECEF',
+                        'light-border': '#DEE2E6',
+                        'light-text': '#212121',
+                        'light-text-secondary': '#495057',
+                        'light-text-placeholder': '#6C757D',
+                        'light-link': '#d32f2f',
+                        'light-link-hover': '#b71c1c',
+                        'light-button-secondary-bg': '#E9ECEF',
+                        'light-button-secondary-hover': '#CED4DA',
+                        'accent': '#DC2626', // red-600
+                        'accent-hover': '#B91C1C', // red-700
+                        'accent-active': '#991B1B', // red-800
+                        'error-text': '#ff6b6b',
+                        'error-border': '#ff6b6b',
+                        'light-error-text': '#d32f2f',
+                        'light-error-border': '#c62828',
+                        'success': '#43a047',
+                        'light-success': '#2e7d32',
+                    },
+                },
+            },
+        }
+    </script>
+    <link rel="stylesheet" href="index.css">
+</head>
+
+<body class="text-light-text dark:text-dark-text transition-colors duration-300">
+
+    <div class="background-container" aria-hidden="true">
+        <div class="blob blob1"></div>
+        <div class="blob blob2"></div>
+        <div class="blob blob3"></div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="relative z-10 min-h-screen flex flex-col">
+        <!-- Header -->
+        <header class="fixed top-0 left-0 w-full bg-light-header/80 dark:bg-dark-header/80 backdrop-blur-sm z-50 h-14 flex justify-center border-b border-light-border/50 dark:border-dark-border/50">
+            <div class="w-full max-w-4xl mx-auto flex items-center justify-between h-14 px-4">
+                <a href="/" class="flex items-center gap-2 group" aria-label="YTMP3 Homepage">
+                    <img src="assets/logo.svg" alt="YTMP3 Logo" class="w-14 h-14">
+                </a>
+                <nav class="flex items-center gap-4">
+                    <button id="history-toggle-btn" class="relative bg-transparent border-none cursor-pointer text-light-text-secondary dark:text-dark-text-secondary p-1.5 flex items-center justify-center rounded-full transition-colors hover:bg-light-surface-light dark:hover:bg-dark-surface-light hover:text-light-text dark:hover:text-dark-text" aria-label="View conversion history">
+                        <svg class="w-8 h-8" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9m-1 5v5l4.25 2.52.77-1.28-3.52-2.09V8z"></path></svg>
+                        <span id="history-notification-dot" class="hidden absolute top-1 right-1 w-2 h-2 bg-accent rounded-full"></span>
+                    </button>
+                    <!-- New Theme Toggle -->
+                    <label class="switch" for="switch" aria-label="Toggle dark/light theme">
+                        <input id="switch" type="checkbox" class="circle" />
+                        <svg
+                          viewBox="0 0 384 512"
+                          xmlns="http://www.w3.org/2000/svg"
+                          class="moon svg"
+                        >
+                          <path
+                            d="M223.5 32C100 32 0 132.3 0 256S100 480 223.5 480c60.6 0 115.5-24.2 155.8-63.4c5-4.9 6.3-12.5 3.1-18.7s-10.1-9.7-17-8.5c-9.8 1.7-19.8 2.6-30.1 2.6c-96.9 0-175.5-78.8-175.5-176c0-65.8 36-123.1 89.3-153.3c6.1-3.5 9.2-10.5 7.7-17.3s-7.3-11.9-14.3-12.5c-6.3-.5-12.6-.8-19-.8z"
+                          ></path>
+                        </svg>
+                        <div class="sun svg">
+                          <span class="dot"></span>
+                        </div>
+                    </label>
+                </nav>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <main class="container mx-auto max-w-[700px] px-4 sm:px-0 mt-20 flex-grow">
+            <div id="content-wrapper" class="rounded-md p-4 sm:p-8 mb-6 relative overflow-hidden text-base leading-7 text-light-text-secondary dark:text-dark-text-secondary">
+                <h1 class="text-3xl sm:text-4xl font-extrabold text-center mb-8 pb-4 relative text-light-text dark:text-dark-text">
+                    DMCA Takedown Policy
+                    <span class="absolute bottom-0 left-1/2 -translate-x-1/2 w-24 h-1 bg-gradient-to-r from-accent to-accent-hover rounded"></span>
+                </h1>
+                
+                <p class="mb-4">YTMP3 respects the intellectual property rights of others and complies with the Digital Millennium Copyright Act ("DMCA"). Our service is an online tool that allows users to convert and download audio from publicly available online videos, and we do not host or store any copyrighted content on our servers.</p>
+            
+                <h2 class="text-2xl font-bold mt-6 mb-3 text-light-text dark:text-dark-text">Notice of Copyright Infringement</h2>
+                <p class="mb-4">If you are a copyright owner or an agent thereof and believe that any content available through our service infringes upon your copyrights, you may submit a DMCA notification.</p>
+                <p class="mb-4">Please be aware that our tool only processes user-submitted URLs. We do not have control over the content hosted on third-party websites like YouTube. To have infringing content removed from the source, you should contact the platform that is hosting the video directly.</p>
+                <p class="mb-4">If you still wish to file a complaint with us, please provide the following information to our designated agent:</p>
+                <ul class="list-disc list-inside mb-4 space-y-2">
+                    <li>A physical or electronic signature of a person authorized to act on behalf of the owner of an exclusive right that is allegedly infringed.</li>
+                    <li>Identification of the copyrighted work claimed to have been infringed.</li>
+                    <li>The specific YouTube URL(s) you are requesting to be blocked on our service.</li>
+                    <li>Information reasonably sufficient to permit us to contact you, such as an address, telephone number, and email address.</li>
+                    <li>A statement that you have a good faith belief that use of the material in the manner complained of is not authorized by the copyright owner, its agent, or the law.</li>
+                    <li>A statement that the information in the notification is accurate, and under penalty of perjury, that you are authorized to act on behalf of the owner of an exclusive right that is allegedly infringed.</li>
+                </ul>
+            
+                <p>Please send your DMCA notice to: <a href="mailto:dmca@ytmp3.example.com" class="font-bold text-light-link dark:text-dark-link hover:underline">dmca@ytmp3.example.com</a>.</p>
+            </div>
+        </main>
+        
+        <!-- History Modal -->
+        <div id="history-modal-overlay" class="fixed inset-0 z-50 bg-black bg-opacity-60 flex items-center justify-center p-4 opacity-0 transition-opacity duration-300 pointer-events-none" role="dialog" aria-modal="true" aria-labelledby="history-heading">
+            <div id="history-modal" class="bg-light-surface dark:bg-dark-surface rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col transform scale-95 opacity-0 transition-all duration-300">
+                <!-- Modal Header -->
+                <div class="flex justify-between items-center p-4 border-b border-light-border dark:border-dark-border flex-shrink-0">
+                    <h2 id="history-heading" class="text-xl font-bold text-light-text dark:text-dark-text" tabindex="-1">Recent</h2>
+                    <div class="flex items-center gap-2">
+                        <button id="clear-history-btn" class="flex items-center gap-2 text-sm text-light-text dark:text-dark-text-secondary py-1 px-3 rounded-md transition-colors hover:bg-light-surface-light dark:hover:bg-dark-surface-light hover:text-light-error-text dark:hover:text-error-text" aria-label="Clear all conversion history">
+                            <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"></path></svg>
+                            Clear All
+                        </button>
+                        <button id="close-history-modal-btn" class="p-2 rounded-full text-light-text-secondary dark:text-dark-text-secondary hover:bg-light-surface-light dark:hover:bg-dark-surface-light" aria-label="Close history modal">
+                            <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg>
+                        </button>
+                    </div>
+                </div>
+                <!-- Modal Body -->
+                <div id="history-body" class="flex-grow overflow-y-auto">
+                     <div id="history-container" class="space-y-3 custom-scrollbar p-4">
+                        <!-- History items will be injected here -->
+                     </div>
+                     <!-- Empty State -->
+                    <div id="history-empty-state" class="hidden p-10 text-center text-light-text-secondary dark:text-dark-text-secondary">
+                         <svg class="w-16 h-16 mx-auto mb-4 opacity-50" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                         <p class="font-semibold text-lg">No Conversions Yet</p>
+                         <p class="text-sm">Your recent conversions will appear here once you convert a video.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Shortcuts Modal -->
+        <div id="shortcuts-modal-overlay" class="fixed inset-0 z-50 bg-black bg-opacity-60 flex items-center justify-center p-4 opacity-0 transition-opacity duration-300 pointer-events-none" role="dialog" aria-modal="true" aria-labelledby="shortcuts-heading">
+            <div id="shortcuts-modal" class="bg-light-surface dark:bg-dark-surface rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col transform scale-95 opacity-0 transition-all duration-300">
+                <!-- Modal Header -->
+                <div class="flex justify-between items-center p-4 border-b border-light-border dark:border-dark-border flex-shrink-0">
+                    <h2 id="shortcuts-heading" class="text-xl font-bold text-light-text dark:text-dark-text" tabindex="-1">Keyboard Shortcuts</h2>
+                    <button id="close-shortcuts-modal-btn" class="p-2 rounded-full text-light-text-secondary dark:text-dark-text-secondary hover:bg-light-surface-light dark:hover:bg-dark-surface-light" aria-label="Close shortcuts modal">
+                        <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg>
+                    </button>
+                </div>
+                <!-- Modal Body -->
+                <div id="shortcuts-body" class="p-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+                        <div class="flex justify-between items-center py-2 border-b border-light-border dark:border-dark-border">
+                            <dt class="font-medium text-light-text dark:text-dark-text">Focus URL Input</dt>
+                            <dd><kbd>Alt</kbd> + <kbd>U</kbd></dd>
+                        </div>
+                        <div class="flex justify-between items-center py-2 border-b border-light-border dark:border-dark-border">
+                            <dt class="font-medium text-light-text dark:text-dark-text">Open History</dt>
+                            <dd><kbd>Alt</kbd> + <kbd>H</kbd></dd>
+                        </div>
+                         <div class="flex justify-between items-center py-2 border-b border-light-border dark:border-dark-border">
+                            <dt class="font-medium text-light-text dark:text-dark-text">Start Conversion</dt>
+                            <dd><kbd>Enter</kbd></dd>
+                        </div>
+                        <div class="flex justify-between items-center py-2 border-b border-light-border dark:border-dark-border">
+                            <dt class="font-medium text-light-text dark:text-dark-text">Download File</dt>
+                            <dd><kbd>Alt</kbd> + <kbd>D</kbd></dd>
+                        </div>
+                        <div class="flex justify-between items-center py-2 border-b border-light-border dark:border-dark-border">
+                            <dt class="font-medium text-light-text dark:text-dark-text">Convert Another</dt>
+                            <dd><kbd>Alt</kbd> + <kbd>N</kbd></dd>
+                        </div>
+                         <div class="flex justify-between items-center py-2 border-b border-light-border dark:border-dark-border">
+                            <dt class="font-medium text-light-text dark:text-dark-text">Copy Share Link</dt>
+                            <dd><kbd>Alt</kbd> + <kbd>C</kbd></dd>
+                        </div>
+                        <div class="flex justify-between items-center py-2 border-b border-light-border dark:border-dark-border">
+                            <dt class="font-medium text-light-text dark:text-dark-text">Close Modal</dt>
+                            <dd><kbd>Esc</kbd></dd>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="text-center w-full mx-auto border-t border-light-border/50 dark:border-dark-border/50 mt-14 py-6 text-sm text-light-text-secondary dark:text-dark-text-secondary">
+            <div class="max-w-4xl mx-auto px-4">
+                <div class="flex justify-center items-center flex-wrap gap-x-6 gap-y-2 mb-4">
+                    <a href="blog.html" class="hover:underline hover:text-light-link dark:hover:text-dark-link">Blog</a>
+                    <a href="contact.html" class="hover:underline hover:text-light-link dark:hover:text-dark-link">Contact</a>
+                    <a href="privacy-policy.html" class="hover:underline hover:text-light-link dark:hover:text-dark-link">Privacy Policy</a>
+                    <a href="terms-of-service.html" class="hover:underline hover:text-light-link dark:hover:text-dark-link">Terms of Service</a>
+                    <a href="dmca.html" class="hover:underline hover:text-light-link dark:hover:text-dark-link">DMCA</a>
+                    <button id="shortcuts-toggle-btn" class="hover:underline hover:text-light-link dark:hover:text-dark-link">Keyboard Shortcuts</button>
+                </div>
+                <p>&copy; 2024 YTMP3. All Rights Reserved. Not affiliated with YouTube.</p>
+            </div>
+        </footer>
+    </div>
+    <script type="module" src="index.tsx" defer></script>
+</body>
+</html>

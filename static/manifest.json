@@ -1,0 +1,24 @@
+
+{
+  "name": "YTMP3 - Free YouTube to MP3 Converter",
+  "short_name": "YTMP3",
+  "description": "A fast, free, and easy-to-use web application to convert YouTube videos to high-quality MP3 audio files.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#1A1B1E",
+  "theme_color": "#DC2626",
+  "icons": [
+    {
+      "src": "assets/icons/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "assets/icons/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
