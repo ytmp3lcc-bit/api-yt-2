@@ -34,6 +34,7 @@ type ConversionJob struct {
     CompletedAt time.Time  `json:"completed_at"`
     FilePath    string     `json:"file_path"`
     DownloadURL string     `json:"download_url"`
+    FirstDownloadedAt time.Time `json:"first_downloaded_at"`
     Error       string     `json:"error"`
     Metadata    *Metadata  `json:"metadata"`
     Retries     int        `json:"retries"`

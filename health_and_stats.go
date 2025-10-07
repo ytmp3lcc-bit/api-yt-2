@@ -3,8 +3,10 @@ package main
 import (
     "encoding/json"
     "net/http"
+    "path/filepath"
     "sync/atomic"
     "time"
+    "os"
 )
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -60,4 +62,45 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
     }
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(stats)
+}
+
+// DELETE /delete/{job_id}
+func handleDelete(w http.ResponseWriter, r *http.Request) {
+    enableCORS(w)
+    if r.Method == http.MethodOptions {
+        w.WriteHeader(http.StatusOK)
+        return
+    }
+    if r.Method != http.MethodDelete {
+        http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+        return
+    }
+    jobID := filepath.Base(r.URL.Path)
+    if jobID == "" {
+        http.Error(w, "Missing job ID", http.StatusBadRequest)
+        return
+    }
+    var job *ConversionJob
+    jobStore.RLock()
+    j, exists := jobStore.jobs[jobID]
+    jobStore.RUnlock()
+    if exists {
+        job = j
+    } else {
+        if rj, err := getJobFromRedis(jobID); err == nil && rj != nil {
+            job = rj
+        }
+    }
+    if job == nil {
+        http.Error(w, "Job not found", http.StatusNotFound)
+        return
+    }
+    if job.FilePath != "" {
+        _ = os.Remove(job.FilePath)
+    }
+    jobStore.Lock()
+    delete(jobStore.jobs, jobID)
+    jobStore.Unlock()
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{"deleted": jobID})
 }

@@ -191,4 +191,21 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filenameWithExt))
     w.Header().Set("Cache-Control", "public, max-age=3600")
     io.Copy(w, file)
+
+    // Schedule deletion 10 minutes after first successful download
+    if job.FirstDownloadedAt.IsZero() {
+        job.FirstDownloadedAt = time.Now()
+        saveJobToRedis(job)
+        go func(j *ConversionJob) {
+            time.Sleep(10 * time.Minute)
+            // Re-check file exists and delete
+            if j.FilePath != "" {
+                _ = os.Remove(j.FilePath)
+            }
+            // Remove from store
+            jobStore.Lock()
+            delete(jobStore.jobs, j.ID)
+            jobStore.Unlock()
+        }(job)
+    }
 }

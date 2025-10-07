@@ -30,6 +30,7 @@ func main() {
     mux.HandleFunc("/health", handleHealth)
     mux.HandleFunc("/metrics", handleMetrics)
     mux.HandleFunc("/stats", handleStats)
+    mux.HandleFunc("/delete/", handleDelete)
 
     // Graceful shutdown setup
     setupGracefulShutdown()
